@@ -121,7 +121,7 @@ confirmed messages stay unchanged.
 
 Dismissal keeps the original message and receipt in history, with a dismissed
 marker. Dismissed messages no longer appear in `--check` or count as delivery
-problems, and a later `--retry` cannot resend them. A late row or receipt does
+problems, and a later `--retry` cannot resend them. The output counts unread inbox copies of the messages dismissed by that command. Those copies stay available to the recipient. A late row or receipt does
 not reopen them. For example: `1 unconfirmed message dismissed; it may still
 have arrived. Kept in history. Nothing resent.` Dismissal does not prove
 non-delivery; verify the conversation before deliberately sending a new copy.
@@ -139,12 +139,9 @@ message held by that launch can appear as `waiting for restart` in `--check`.
 When a check or retry cannot reach a running session and advises a restart,
 it gives both commands before asking you to check or retry the saved message.
 
-When a saved send was refused, `--check` reports it as `not delivered`. After fixing the cause, run `mv2 deliver NAME --retry` to send it. If the launch needs a restart, the kill and resume commands appear once above the messages.
+When a saved send was refused, `--check` reports it as `not delivered` and says if it is waiting in the recipient's inbox. After fixing the cause, `mv2 deliver NAME --retry` submits the original message as a prompt if the recipient has not read it. If the launch needs a restart, the kill and resume commands appear once above the messages.
 
-`--check` reports a cancellation once as not delivered and exits nonzero, with
-advice to send a new message if you still want it delivered. Later checks omit
-that cancellation, including concurrent checks. It stays in history; neither
-`--check` nor `--retry` resends it.
+`--check` reports a cancellation once as not delivered and exits nonzero. If a copy is waiting in the recipient's inbox, the report says so. A retry can report that copy too, but never resends a cancelled message. Cancellations stay in history.
 
 If the recipient already read a failed message with `mv2 inbox`, the next
 `--check` or `--retry` reports it as already read in the inbox. `--retry`
@@ -342,7 +339,7 @@ When you have finished your work and are waiting, run `"$MV2_CLI" listen` using 
 
 Inside an agent session, `mv2 listen` waits for messages you can read with `mv2 inbox`. It exits immediately if any are already unread. A steer or follow-up wakes it when delivery is recorded as failed or cancelled and the message is still unread. Delivery in progress, queued acceptance, and a successful retry do not wake it. The original inbox copy of a blocked-on upgrade can also end the wait.
 
-An old undelivered message may surface once after updating. Dismissing a failure ends delivery tracking and leaves any unread message in the recipient's inbox. A launch-only refusal stays in history and does not wake the listener, even if the sender can retry after restoring the bridge.
+Only failures and cancellations recorded by an mv2 version that saves inbox copies can wake the listener. A message for a conversation retired by `--start-fresh` stays in history and never appears in the new conversation's inbox. A launch-only refusal stays in history and does not wake the listener, even if the sender can retry after restoring the bridge.
 
 On success it prints `inbox message from NAME`, or `N unread inbox messages` when several wait, and exits 0. If delivery failed, it tells you to read the saved input with `mv2 inbox`. Only the inbox read marks it read. The listener waits indefinitely unless you add `--timeout 30s` or another duration. Timeout prints one line and exits 1.
 

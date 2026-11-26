@@ -184,6 +184,7 @@ class WakeTest(BaseTest):
                 if path != 'startup flush':
                     self.assertEqual(stopped['native_cancellation']['failed_startup_messages'], 1)
                     self.assertEqual(stopped['native_cancellation']['retryable_startup_messages'], 1)
+                    self.assertEqual(stopped['native_cancellation']['startup_messages_in_inbox'], 1)
                 lines = []
                 checked = deliver.run(self.root, agent=self.agent, check=True, _present=lines.append)
                 self.assertEqual([item['state'] for item in checked['messages']], ['error'])

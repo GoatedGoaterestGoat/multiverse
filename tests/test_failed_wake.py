@@ -234,7 +234,7 @@ class FailedWakeTest(BaseTest):
                 else:
                     detail = [text for text in first if line in text]
                     self.assertEqual(len(detail), 1, first)
-                    self.assertIn('Do not resend' if expected == 'accepted' else 'Send a new message', detail[0])
+                    self.assertIn('Do not resend' if expected == 'accepted' else "It is waiting in wake's inbox.", detail[0])
                     # A loss is reported once; an unsettled wake is asked again at every check.
                     if expected == 'cancelled':
                         self.assertEqual(second, settled)

@@ -1764,8 +1764,9 @@ def kill(root, reference, *, attachment_only=False):
             else:
                 cancellation = native.stop(root, reference)
             if attachment_only:
-                mailbox.end_startup_messages(agent_dir, launch_id,
+                startup = mailbox.end_startup_messages(agent_dir, launch_id,
                     'Terminal attachment closed before delivery; saved for explicit retry')
+                cancellation = replace(cancellation, value=startup)
         except Exception as error:
             if live not in ('stopped', 'dormant'):
                 def cancel_stop(current):

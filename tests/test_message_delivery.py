@@ -421,7 +421,7 @@ class InboxDeliveryTest(DeliveryFixture):
         adapter = harnesses.load(self.root, 'claude')
         with patch.object(adapter, 'stop', create=True, return_value=NativeResult('ok', value={
                 'cancelled_message_ids': [message['id']]})):
-            native.stop(self.root, self.agent)
+            self.assertEqual(native.stop(self.root, self.agent).value['cancelled_messages_in_inbox'], 1)
         before = message_record(self.directory, message['id'])[1]
         lines = []
         # Final cancellation remains reportable even if the harness can no longer load.
@@ -439,13 +439,31 @@ class InboxDeliveryTest(DeliveryFixture):
             checked = next(result for result in results if result['messages'])
             self.assertFalse(checked['ok'], checked)
             self.assertEqual([item['state'] for item in checked['messages']], ['cancelled'])
-            self.assertEqual(sum('Send a new message' in line for line in lines), 1)
+            name = read(self.directory / 'properties.json')['name']
+            self.assertEqual(sum(line == f"{name}: message cancelled before delivery. It is waiting in {name}'s inbox."
+                                 for line in lines), 1)
+            self.assertFalse(any('Send a new message' in line for line in lines))
             self.assertEqual(deliver.run(self.root, agent=self.agent, check=True)['messages'], [])
             self.assertEqual(deliver.run(self.root, agent=self.agent, retry=True)['messages'], [])
         after = message_record(self.directory, message['id'])[1]
         self.assertEqual(after['submission_state'], 'cancelled')
         self.assertEqual(after.get('attempts'), before.get('attempts'))
         self.assertEqual(self.calls, [])
+
+        another = append_message(self.directory, 'cancelled before a sender retry', {}, delivery='follow-up')
+        update_message(self.directory, another['id'], submission_state='cancelled')
+        lines.clear()
+        with patch.object(native, 'send_or_wake', side_effect=AssertionError('cancellations cannot be resent')):
+            self.assertTrue(deliver.run(self.root, agent=self.agent, retry=True, _present=lines.append)['ok'])
+        self.assertEqual(lines, [f"{name}: message cancelled before delivery. It is waiting in {name}'s inbox."])
+
+        read_copy = append_message(self.directory, 'cancelled before the inbox read', {}, delivery='follow-up')
+        update_message(self.directory, read_copy['id'], submission_state='cancelled')
+        self.assertIn(read_copy['id'], [row['id'] for row in inbox(self.directory)['messages']])
+        lines.clear()
+        deliver.run(self.root, agent=self.agent, check=True, _present=lines.append)
+        self.assertEqual(lines, [f'{name}: 1 not delivered.',
+                                 f'{name}: message cancelled before delivery. {name} already read it in the inbox.'])
 
     def test_an_ended_acceptance_needs_exit_and_same_idle_conversation_proof(self):
         """Lost acceptances need independent exit and exact idle-session evidence; guessing from a new launch can
@@ -831,15 +849,19 @@ class InboxDeliveryTest(DeliveryFixture):
                 self.assertEqual(retried['finalized'], 1)
                 self.assertTrue(any('1 earlier message is final' in line for line in retry_lines), retry_lines)
                 self.assertIsNone(deliver.mailbox.delivery_problem(self.directory, self.agent))
-        with self.subTest('five old acceptances stay final after a fresh start and repeated retries'):
+        with self.subTest('old acceptances and failures stay final after a fresh start and repeated retries'):
             from multiverse.universe import sessions
             self.recipient(native_session_home=str(self.work))
             older = [self.send(f'old acceptance {index}') for index in range(5)]
+            self.behavior = NativeResult('error', 'refused before retirement')
+            retired_failure = self.send('retired failure')
+            self.assertEqual([row['id'] for row in inbox(self.directory, peek=True)['messages']], [retired_failure['id']])
             properties = read(self.directory / 'properties.json')
             replacement = {**properties, 'native_session_id': str(uuid4()), 'native_storage_environment': {}}
             next_launch = str(uuid4())
             sessions.retire(self.root, self.directory, self.native_id, replacement, next_launch,
                             previous_launch=self.launch)
+            self.assertEqual(inbox(self.directory, peek=True)['messages'], [])
             write(self.directory / 'runtime.json', {'launch_id': next_launch, 'state': 'running', 'tmux': self.terminal})
             self.behavior = NativeResult('error', 'refused before submission')
             current = self.send('new conversation input')
@@ -849,18 +871,21 @@ class InboxDeliveryTest(DeliveryFixture):
             with patch.object(adapter, 'get_delivery', side_effect=AssertionError('retired conversation must not be queried')):
                 checked = deliver.run(self.root, agent=self.agent, retry=True, _present=lines.append)
             self.assertTrue(checked['ok'], checked)
-            self.assertEqual(checked['finalized'], 5)
-            self.assertEqual(len(checked['messages']), 6)
-            self.assertEqual(sum('never reached the new conversation' in line and 'Send a new message' in line for line in lines), 5)
+            self.assertEqual(checked['finalized'], 6)
+            self.assertEqual(len(checked['messages']), 7)
+            self.assertEqual(sum('never reached the new conversation' in line and 'Send a new message' in line for line in lines), 6)
+            name = properties['name']
+            self.assertIn(f'{name}: message "retired failure" never reached the new conversation. '
+                          'Send a new message if you still want it delivered.', lines)
             self.assertFalse(any('cannot check' in line for line in lines), lines)
             for repeat in range(3):
                 lines = []
                 retried = deliver.run(self.root, agent=self.agent, retry=True, _present=lines.append)
                 self.assertTrue(retried['ok'])
                 self.assertEqual(retried['messages'], [])
-                self.assertEqual(retried['finalized'], 5)
-                self.assertTrue(any('5 earlier messages are final' in line for line in lines), lines)
-            self.assertEqual(len(self.calls), 7)  # Five old accepts, one refusal, one retry.
+                self.assertEqual(retried['finalized'], 6)
+                self.assertTrue(any('6 earlier messages are final' in line for line in lines), lines)
+            self.assertEqual(len(self.calls), 8)  # Five old accepts, two refusals, one retry.
             update_message(self.directory, current['id'], native_receipt={'transcript_confirmed': True})
             self.assertEqual(deliver.run(self.root, agent=self.agent, check=True)['messages'], [])
             self.assertTrue(all(message_record(self.directory, item['id'])[1]['submission_state'] == 'accepted' for item in older))

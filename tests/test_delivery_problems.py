@@ -132,7 +132,8 @@ class DeliveryProblemTest(BaseTest):
                                      'recipient: 1 waiting for restart, 1 not delivered.',
                                      'recipient: message waiting for restart.'])
             self.assertEqual(errors, [f'recipient: message not delivered: {reason}. '
-                                      'After the restart, run mv2 deliver recipient --retry.'])
+                                      'After the restart, run mv2 deliver recipient --retry. '
+                                      "It is waiting in recipient's inbox. A retry submits it as a prompt if it is still unread."])
         self.assertEqual(adapter.get_delivery.call_count, 2)  # Only the queued message was checked.
         adapter.capabilities.assert_not_called()
         adapter.send.assert_not_called()
@@ -164,7 +165,8 @@ class DeliveryProblemTest(BaseTest):
                         elif not check and live == 'alive':
                             self.assertEqual(lines[-1], 'Not delivered to recipient: Bridge refused connection. Saved; '
                                              'restart it with mv2 kill recipient, then mv2 resume recipient, '
-                                             'then mv2 deliver recipient --retry or --dismiss.')
+                                             'then mv2 deliver recipient --retry or --dismiss. '
+                                             "It is waiting in recipient's inbox. A retry submits it as a prompt if it is still unread.")
                         else:
                             self.assertIn('Saved; resume it', lines[-1])
                 with patch.object(deliver, 'running_for_delivery_advice') as observed:
@@ -193,7 +195,8 @@ class DeliveryProblemTest(BaseTest):
             self.assertTrue(result['ok'])
             self.assertEqual(result['dismissed'], 5)
             self.assertEqual((result['dismissed_failures'], result['dismissed_unconfirmed']), (2, 3))
-            self.assertEqual(lines, ['recipient: 2 delivery failures dismissed; kept in history. Nothing resent.',
+            self.assertEqual(lines, ['recipient: 2 delivery failures dismissed; kept in history. Nothing resent. '
+                                    "1 of the messages just dismissed is still waiting in recipient's inbox.",
                                     'recipient: 3 unconfirmed messages dismissed; they may still have arrived. Kept in history. Nothing resent.'])
             self.assertEqual(deliver.run(self.root, agent='recipient', dismiss=True)['dismissed'], 0)
         self.assertIsNone(mailbox.delivery_problem(self.directory, 'recipient'))
@@ -228,7 +231,8 @@ class DeliveryProblemTest(BaseTest):
         self.message('failed')
         lines = []
         self.assertEqual(deliver.run(self.root, agent='recipient', dismiss=True, _present=lines.append)['dismissed'], 1)
-        self.assertEqual(lines, ['recipient: 1 delivery failure dismissed; kept in history. Nothing resent.'])
+        self.assertEqual(lines, ['recipient: 1 delivery failure dismissed; kept in history. Nothing resent. '
+                                 "1 of the messages just dismissed is still waiting in recipient's inbox."])
         self.message('unknown')
         lines = []
         result = deliver.run(self.root, agent='recipient', dismiss=True, _present=lines.append)

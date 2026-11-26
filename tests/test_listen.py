@@ -19,8 +19,8 @@ from multiverse import cli, store
 from multiverse.harnesses.types import AgentIdentitySpec, NativeEndpoint, NativeResult, NativeServiceHandle, ServiceIdentity
 from multiverse.runtime import agent_identity, focus_note, listen_proof, native
 from multiverse.runtime.process import process_started
-from multiverse.tools import inbox as inbox_tool, listen, report, send
-from multiverse.universe import focus, mailbox
+from multiverse.tools import deliver, inbox as inbox_tool, listen, report, send
+from multiverse.universe import focus, mailbox, sessions
 
 
 def start_token(pid):
@@ -337,6 +337,7 @@ output(listen.run,render=listen.format_output,root=sys.argv[2],timeout=sys.argv[
         self.assertIn('could not be delivered', self.command('--timeout', '0')[1])
         mailbox.update_message(self.directory, message['id'], native_receipt={'transcript_confirmed': True})
         self.assertEqual(self.command('--timeout', '0')[0], 1)
+
         mailbox.update_message(self.directory, message['id'], native_receipt=None,
                                attempts=[{'delivery_receipt': {'value': {'transcript_confirmed': True}}}])
         self.assertEqual(self.command('--timeout', '0')[0], 1)
@@ -350,6 +351,49 @@ output(listen.run,render=listen.format_output,root=sys.argv[2],timeout=sys.argv[
                                attempts=[temporary], last_receipt=temporary)
         self.assertEqual(mailbox.message_record(self.directory, message['id'])[1]['submission_state'], 'failed')
         self.assertEqual(self.command('--timeout', '0')[0], 1)
+
+    def test_new_failures_behind_cursor_stay_with_their_conversation(self):
+        """Old records and retirement must not surface a missed message in a newly launched conversation."""
+        self.proven()
+        lost = self.message('steer')
+        failed = self.message('follow-up')
+        legacy = self.message('steer')
+        # Old writers had no marker. Start with the cursor beyond all three rows.
+        store.write(self.directory / 'inbox-state.json', {legacy['id']: {
+            'submission_state': 'failed', 'attempts': [{'state': 'error', 'reason': 'previous release'}],
+        }})
+        self.assertEqual(mailbox.inbox(self.directory)['messages'], [])
+        self.assertEqual(self.command('--timeout', '0')[0], 1)
+        # Looking at old evidence, or rewriting it, does not backfill a copy.
+        mailbox.update_message(self.directory, legacy['id'], submission_state='failed')
+        self.assertEqual(self.command('--timeout', '0')[0], 1)
+        mailbox.update_message(self.directory, lost['id'], target_session=self.native, submission_state='cancelled',
+                               last_receipt={'state': 'cancelled', 'value': {'lost_when_stopped': True}})
+        mailbox.update_message(self.directory, failed['id'], target_session=self.native, submission_state='failed',
+                               attempts=[{'state': 'error', 'reason': 'rejected'}])
+        lines = []
+        with patch.object(native, 'finalize_launch_only', return_value=None):
+            deliver.run(self.root, agent=self.agent, check=True, _present=lines.append)
+            self.assertIn(
+                'listener: message "quiet work" not delivered: lost when the agent stopped. '
+                "If the harness restored a draft, it has not been submitted. It is waiting in listener's inbox.",
+                lines,
+            )
+            lines.clear()
+            deliver.run(self.root, agent=self.agent, dismiss=True, _present=lines.append)
+        self.assertEqual(lines, ['listener: 2 delivery failures dismissed; kept in history. Nothing resent. '
+                                 "1 of the messages just dismissed is still waiting in listener's inbox."])
+        self.assertEqual(self.command('--timeout', '0')[:2], (0, '2 unread inbox messages. 2 could not be delivered. '
+                                                              'Run mv2 inbox to read them.\n'))
+        self.assertEqual([row['id'] for row in mailbox.inbox(self.directory, peek=True)['messages']],
+                         [lost['id'], failed['id']])
+
+        replacement = {**self.properties, 'native_session_id': store.uid(), 'native_storage_environment': {}}
+        sessions.retire(self.root, self.directory, self.native, replacement, store.uid())
+        self.assertEqual(mailbox.inbox(self.directory, peek=True)['messages'], [])
+        self.assertEqual(self.command('--timeout', '0')[0], 1)
+        (self.directory / 'sessions.jsonl').unlink()
+        self.assertEqual(mailbox.inbox(self.directory, peek=True)['messages'], [])
 
     def test_failed_delivery_does_not_change_which_held_messages_listen_claims(self):
         """The focus note and listener share the held claim, but the failure remains independently unread."""

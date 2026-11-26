@@ -111,6 +111,8 @@ def _run(root, directory, *, retry=False, check=False, dismiss=False, _present=N
             continue
         if check and tracking.get('uncheckable_reported_at'):
             continue
+        cancelled_copy = (retry and state == 'cancelled' and not tracking.get('cancelled_reported_at')
+                          and mailbox.failed_inbox_status(directory, message, tracking) == 'waiting')
         accepted = False
         outside_lineage = False
         try:
@@ -138,7 +140,7 @@ def _run(root, directory, *, retry=False, check=False, dismiss=False, _present=N
                     old_evidence = native.adapter_hook(adapter, 'accepted_message_evidence') is not None
                 accepted = bool(attempts[-1].get('launch_id') == launch_id or queued or old_evidence or outside_lineage)
             accepted = accepted or started_wake
-            if not outside_lineage and not accepted and state not in (('failed', 'launch-only') if retry else ('failed', 'pending', 'submitting', 'unknown', 'cancelled')):
+            if not outside_lineage and not accepted and not cancelled_copy and state not in (('failed', 'launch-only') if retry else ('failed', 'pending', 'submitting', 'unknown', 'cancelled')):
                 continue
             final = native.finalize_launch_only(root, directory, message['id']) if state in ('failed', 'pending') and not outside_lineage and not final_lineage else None
             if final is not None and final.get('state') != 'read' and retry:
@@ -148,7 +150,7 @@ def _run(root, directory, *, retry=False, check=False, dismiss=False, _present=N
                 # Recheck the pointer under the launch lock before claiming a
                 # once-only diagnostic; this history snapshot can predate a rebind.
                 receipt = native.deliver(root, directory.name, message['id'], check=True)
-            elif check and state == 'cancelled':
+            elif state == 'cancelled':
                 claimed = mailbox.claim_cancelled_report(directory, message['id'])
                 if claimed is None:
                     continue
@@ -192,6 +194,8 @@ def _run(root, directory, *, retry=False, check=False, dismiss=False, _present=N
         if uncheckable and mailbox.claim_uncheckable_report(directory, message['id']) is None:
             continue
         summary = delivery_summary(receipt)
+        if cancelled_copy and receipt.get('state') == 'cancelled':
+            summary['ok'] = True  # Reporting the final copy does not attempt a retry.
         if retry and uncheckable:
             # Reporting a final is not a failed submission. Keep its original
             # delivery evidence, but count it with previously reported finals.
@@ -210,12 +214,15 @@ def _run(root, directory, *, retry=False, check=False, dismiss=False, _present=N
         historical = isinstance(receipt.get('value'), dict) and receipt['value'].get('historical_conversation') is True
         if _present and (category != 'confirmed' or historical) and (not dismiss or uncheckable or receipt.get('state') == 'cancelled'):
             _, current = mailbox.message_record(directory, message['id'])
+            failed_inbox = (mailbox.failed_inbox_status(directory, message, current)
+                            if receipt.get('state') in ('error', 'unavailable', 'cancelled') else None)
             present = _present_error if summary.get('ok') is False and _present_error else _present
             # A check can share one observation. A retry may have started a new launch before the next failure.
             if not restart and receipt.get('state') in ('error', 'unavailable') and (retry or running is None):
                 running = running_for_delivery_advice(directory)
             line = display.with_notices(delivery_line(name, receipt, delivery=message['delivery'], check=check, retry=retry, accepted=accepted,
                                   wake=current.get('delivery_method') == 'resume_prompt', text=message['text'],
+                                  failed_inbox=failed_inbox,
                                   running=running, restart_reported=bool(restart)), receipt)
             if check:
                 details.append((present, line))
@@ -233,7 +240,11 @@ def _run(root, directory, *, retry=False, check=False, dismiss=False, _present=N
                 _present(f'{name}: {confirmed} {"message" if confirmed == 1 else "messages"} confirmed in '
                          f'{"its conversation" if confirmed == 1 else "their conversations"}; not dismissed.')
             if failures:
-                _present(f'{name}: {failures} delivery {"failure" if failures == 1 else "failures"} dismissed; kept in history. Nothing resent.')
+                line = f'{name}: {failures} delivery {"failure" if failures == 1 else "failures"} dismissed; kept in history. Nothing resent.'
+                if inbox_count := len(dismissed['inbox']):
+                    line += (f" {inbox_count} of the messages just dismissed {'is' if inbox_count == 1 else 'are'} "
+                             f"still waiting in {name}'s inbox.")
+                _present(line)
             if unconfirmed:
                 _present(f'{name}: {unconfirmed} unconfirmed {"message" if unconfirmed == 1 else "messages"} dismissed; '
                          f'{"it" if unconfirmed == 1 else "they"} may still have arrived. Kept in history. Nothing resent.')

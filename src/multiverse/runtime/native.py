@@ -29,7 +29,7 @@ from ..store import exists_replaced, lock, now, read, retry_missing, write
 from ..terminal.tmux import owned, observe, observation_key
 from ..terminal.recovery import Unreachable
 from ..universe import agents, records
-from ..universe.mailbox import end_startup_messages, failed_copy_read, inbox, inbox_fallback, message_record, update_message
+from ..universe.mailbox import cancel_delivery_messages, end_startup_messages, failed_copy_read, inbox, inbox_fallback, message_record, update_message
 
 
 def environment(command):
@@ -571,17 +571,11 @@ def stop(root, reference):
     if live in ('stopped', 'dormant'):
         session = replace(session, state=live)
     result = effects.call(adapter, 'stop', session, executor)
-    for message_id in (result.value or {}).get('cancelled_message_ids', []):
-        try:
-            message_record(directory, message_id)
-        except ValueError:
-            continue  # Native input from another client is not a core inbox record.
-        update_message(directory, message_id, submission_state='cancelled', cancelled_at=now(),
-                       last_receipt={'state': 'unavailable', 'reason': 'Cancelled by explicit agent stop'})
+    cancelled = cancel_delivery_messages(directory, (result.value or {}).get('cancelled_message_ids', []))
     if result.state != 'ok':
         raise RuntimeError(f'Native stop incomplete: {result.reason}')
     startup = end_startup_messages(directory, session.launch_id, 'Agent stopped before startup delivery')
-    return replace(result, value={**(result.value or {}), **startup})
+    return replace(result, value={**(result.value or {}), **cancelled, **startup})
 
 
 def capabilities(root, reference, run_probe=False):

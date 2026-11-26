@@ -125,6 +125,7 @@ def run(root=None, *, agent, text=None, file=None, stdin=False, sender=None, del
                 unread_senders = _unread_senders(caller) if _present or _present_error else set()
             result, receipt = _send_one(root, directory, text, sender, delivery, queue_only, _note_for, holds,
                                         as_user)
+            failed_inbox = result.pop('failed_inbox', None)
             running = bool(_present and result.get('delivery') != 'inbox-only'
                            and receipt.get('state') in ('error', 'unavailable') and running_for_delivery_advice(directory))
             if result.get('upgrade_damaged'):
@@ -137,7 +138,8 @@ def run(root=None, *, agent, text=None, file=None, stdin=False, sender=None, del
             elif result['delivery'] == 'inbox-only':
                 line = f"Saved to {name}'s inbox; it sees it at its next check."
             else:
-                line = display.with_notices(delivery_line(name, receipt, delivery=result['delivery'], text=result['text'], running=running), receipt)
+                line = display.with_notices(delivery_line(name, receipt, delivery=result['delivery'], text=result['text'],
+                                          running=running, failed_inbox=failed_inbox), receipt)
             if result.get('upgraded_from'):
                 if result['state'] in ('held', 'pending'):
                     prefix = 'Your message was scheduled as a follow-up instead'
@@ -341,6 +343,8 @@ def _deliver_one(root, directory, text, sender, delivery, note_for, holds=True, 
         receipt = {'state': 'error', 'ok': False, 'reason': reason,
                    'value': {'pre_submission_failure': True}}
         return ({**result, 'state': 'error', 'saved': True, 'ok': False,
+                 'failed_inbox': mailbox.failed_inbox_status(directory, message, {
+                     'submission_state': 'failed', 'failed_inbox_copy': True}),
                  'native_delivery': delivery_summary(receipt)}, receipt)
     if binding_error:
         receipt = {'state': 'error', 'reason': str(binding_error),
@@ -369,13 +373,18 @@ def _deliver_one(root, directory, text, sender, delivery, note_for, holds=True, 
 
 def _completed(directory, message, receipt, *, upgraded):
     result = {key: message[key] for key in ('at', 'from', 'text', 'delivery')}
-    if upgraded:
+    if upgraded or receipt['state'] in ('error', 'unavailable', 'cancelled'):
         try:
             _, tracking = message_record(directory, message['id'])
         except (OSError, ValueError, TypeError) as error:
-            receipt = {'state': 'unknown', 'ok': False, 'reason': str(error)}
-            return ({**result, 'state': 'unknown', 'saved': True, 'ok': False, 'upgrade_damaged': True,
-                     'native_delivery': delivery_summary(receipt)}, receipt)
+            if upgraded:
+                receipt = {'state': 'unknown', 'ok': False, 'reason': str(error)}
+                return ({**result, 'state': 'unknown', 'saved': True, 'ok': False, 'upgrade_damaged': True,
+                         'native_delivery': delivery_summary(receipt)}, receipt)
+        else:
+            if failed_inbox := mailbox.failed_inbox_status(directory, message, tracking):
+                result['failed_inbox'] = failed_inbox
+    if upgraded:
         if (receipt.get('state') in ('error', 'unavailable')
                 and tracking.get('submission_state') in ('accepted', 'unknown', 'submitting')):
             receipt = {**receipt, 'state': 'unknown', 'ok': False,

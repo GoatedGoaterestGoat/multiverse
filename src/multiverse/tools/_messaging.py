@@ -61,7 +61,7 @@ def failure_reason(reason, text='', *, preserve_details=False):
 
 
 def _delivery_line(name, receipt, *, delivery='steer', wake=False, check=False, retry=False,
-                   accepted=False, text='', running=False, restart_reported=False):
+                   accepted=False, text='', running=False, restart_reported=False, failed_inbox=None):
     state = receipt.get('state')
     value = receipt.get('value')
     value = value if isinstance(value, dict) else {}
@@ -73,22 +73,22 @@ def _delivery_line(name, receipt, *, delivery='steer', wake=False, check=False, 
         return f'{name}: message waiting for restart.'
     if value.get('dismissed') is True:
         return f'{name}: message dismissed; kept in history. Nothing resent.'
+    resend = '' if failed_inbox else ' Send a new message if you still want it delivered.'
     if value.get('outside_lineage') is True:
         if value.get('retired_by_fresh_start') is True:
             return (f'{name}: message {json.dumps(clean(text), ensure_ascii=False)} never reached the new conversation. '
                     'Send a new message if you still want it delivered.')
         if value.get('final') is True or retry:
+            advice = ('.' if failed_inbox else ', then send a new message if you still want it delivered.')
             return (f'{name}: cannot retry saved message {json.dumps(clean(text), ensure_ascii=False)}: '
-                    'its conversation is outside the recorded lineage. Verify the original conversation, '
-                    'then send a new message if you still want it delivered.')
+                    'its conversation is outside the recorded lineage. Verify the original conversation' + advice)
         return (f'{name}: cannot check message {json.dumps(clean(text), ensure_ascii=False)}: '
                 'its conversation is outside the recorded lineage. Inspect the original conversation. Do not resend without verifying it.')
     if state == 'cancelled' and value.get('lost_when_stopped') is True:
         return (f'{name}: message {json.dumps(clean(text), ensure_ascii=False)} not delivered: lost when the agent stopped. '
-                'If the harness restored a draft, it has not been submitted. '
-                'Send a new message if you still want it delivered.')
+                'If the harness restored a draft, it has not been submitted.') + resend
     if state == 'cancelled':
-        return f'{name}: message cancelled before delivery. Send a new message if you still want it delivered.'
+        return f'{name}: message cancelled before delivery.' + resend
     if value.get('paused') is True:
         cause = paused_queue_cause(value.get('paused_reason', 'interrupt'))
         suffix = f' {cause}' if cause else ''
@@ -102,9 +102,10 @@ def _delivery_line(name, receipt, *, delivery='steer', wake=False, check=False, 
             if check:
                 prefix = f'{name}: message not delivered' if refused else f'{name}: could not check delivery'
             if value.get('wake_refused') is True and not check:
+                advice = ('' if failed_inbox else
+                          ' For a launch-only agent, resend with --delivery inbox-only for manual reading.')
                 return (f'{prefix}: {why}. Saved; resolve the named terminal problem. '
-                        f'With a working bridge, run mv2 deliver {name} --retry. '
-                        'For a launch-only agent, resend with --delivery inbox-only for manual reading.')
+                        f'With a working bridge, run mv2 deliver {name} --retry.' + advice)
             return (f'{prefix}: {why}. Saved; resolve the named terminal problem, '
                     f'then mv2 deliver {name} --{action}.')
         if value.get('repair_journal'):
@@ -174,9 +175,18 @@ def _delivery_line(name, receipt, *, delivery='steer', wake=False, check=False, 
     return f'Sent to {name}; it reads this at its next pause.'
 
 
-def delivery_line(name, receipt, **kwargs):
-    line = _delivery_line(name, receipt, **kwargs)
+def delivery_line(name, receipt, *, failed_inbox=None, **kwargs):
+    if failed_inbox == 'read' and receipt.get('state') in ('error', 'unavailable'):
+        return f'{name}: message already read in the inbox.'
+    line = _delivery_line(name, receipt, failed_inbox=failed_inbox, **kwargs)
     value = receipt.get('value') or {}
+    if failed_inbox == 'waiting':
+        line += f" It is waiting in {name}'s inbox."
+        if (receipt.get('state') in ('error', 'unavailable')
+                and not any(value.get(key) for key in ('dismissed', 'outside_lineage', 'check_error', 'repair_journal'))):
+            line += ' A retry submits it as a prompt if it is still unread.'
+    elif failed_inbox == 'read':
+        line += f' {name} already read it in the inbox.'
     if value.get('historical_conversation') is True and value.get('native_session_id'):
         if value.get('paused') is True:
             return (f'{name}: message queued and paused in original conversation {value["native_session_id"]}. '

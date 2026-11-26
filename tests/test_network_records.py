@@ -208,9 +208,11 @@ class ReplacedRecordsTest(BaseTest):
                     native._session_snapshot(self.root, self.directory, self.properties, {},
                                              adapter=SimpleNamespace(name='codex'))
                 self.assertEqual(error.exception.errno, number)
-        with patch.object(Path, 'open', side_effect=PermissionError('denied')), \
+        with patch.object(os, 'open', side_effect=PermissionError(errno.EACCES, 'denied', journal)) as opened, \
                 self.assertRaisesRegex(sessions.JournalError, 'cannot read'):
             sessions.journal(self.directory)
+        self.assertEqual(opened.call_count, 1)
+        self.assertTrue(opened.call_args.args[1] & os.O_NONBLOCK)
 
     def test_optional_indexes_identity_and_universe_metadata_survive_replacement(self):
         """Missing metadata must not discard pending commands, reserve no identity, or select a parent universe."""

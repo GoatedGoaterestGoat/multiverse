@@ -62,6 +62,13 @@ class RecordCommandsTest(BaseTest):
                 self.assertEqual(code, 0)
                 self.assertIn('2 messages waiting for it to start were not delivered. '
                               'Run mv2 deliver worker --retry to send them.', out)
+                with patch.object(lifecycle, 'kill', return_value=self.killed(
+                        failed_startup_messages=1, retryable_startup_messages=1,
+                        startup_messages_in_inbox=1, cancelled_messages_in_inbox=1)):
+                    self.assertEqual(self.command(name, 'worker'), (
+                        "Stopped worker. This stop left 2 undelivered messages waiting in worker's inbox. "
+                        "1 message waiting for it to start was not delivered. "
+                        "Run mv2 deliver worker --retry to send it as a prompt if unread.", '', 0))
                 for counts, hint in (
                     ({'failed_startup_messages': 2, 'retryable_startup_messages': 1},
                      'Run mv2 deliver worker --retry to send the retryable messages.'),

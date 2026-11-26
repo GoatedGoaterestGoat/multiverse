@@ -5,10 +5,10 @@ import errno
 import json
 import os
 from pathlib import Path
-from functools import partial
+from functools import cache, partial
 
 from ..store import lock, now, open_regular, open_replaced, exists_replaced, missing_records, read, uid, write
-from . import records
+from . import records, sessions
 
 
 def append_message(agent_dir, text, sender, delivery="inbox-only", *, target_session=None, intended=None, focus=None,
@@ -118,7 +118,7 @@ INBOX_EVIDENCE = ('inbox.cursor', 'inbox-read.json', 'inbox-state.json', 'native
 def inbox_signature(agent_dir):
     """A polling hint that includes failures recorded without an append or cursor move."""
     stamps = []
-    for name in ('inbox.jsonl', *INBOX_EVIDENCE, 'inbox-unsubmitted'):
+    for name in ('inbox.jsonl', *INBOX_EVIDENCE, 'inbox-unsubmitted', 'properties.json', 'sessions.jsonl'):
         try:
             info = (agent_dir / name).stat()
             stamps.append((info.st_ino, info.st_size, info.st_mtime_ns))
@@ -303,7 +303,8 @@ def _states(agent_dir, *, observed_missing=None, budget=None):
             receipt = {'state': 'error', 'ok': False, 'reason': failed['reason'],
                        'value': {'pre_submission_failure': True}}
             states[identifier] = {**previous, 'submission_state': 'failed',
-                                  'attempts': previous.get('attempts') or [receipt]}
+                                  'attempts': previous.get('attempts') or [receipt],
+                                  **({'failed_inbox_copy': True} if failed.get('failed_inbox_copy') is True else {})}
     return states
 
 
@@ -400,7 +401,7 @@ def record_unsubmitted(agent_dir, message_id, reason):
         if not any(message.get('id') == message_id for _, message in messages):
             raise ValueError('Message does not belong to this recipient inbox')
         write(agent_dir / 'inbox-unsubmitted' / (message_id + '.json'),
-              {'schema': 1, 'message_id': message_id, 'at': now(), 'reason': reason})
+              {'schema': 1, 'message_id': message_id, 'at': now(), 'reason': reason, 'failed_inbox_copy': True})
 
 
 def inbox_problem(agent_dir, *, observed_missing=None):
@@ -465,11 +466,53 @@ def _delivery_confirmed(state):
 
 def _failed_copy(message, state):
     """Expose definite native failures without reopening accepted or confirmed input."""
-    if (message.get('schema') != 2 or message.get('delivery') not in ('steer', 'follow-up')
+    if (state.get('failed_inbox_copy') is not True or message.get('schema') != 2
+            or message.get('delivery') not in ('steer', 'follow-up')
             or state.get('submission_state') not in ('failed', 'cancelled') or _delivery_confirmed(state)):
         return False
     value = _last_receipt_value(state)
-    return not (state['submission_state'] == 'failed' and isinstance(value, dict) and value.get('launch_only') is True)
+    return not (isinstance(value, dict) and value.get('launch_only') is True)
+
+
+def _retired_targets(directory):
+    # The append is the retirement, even if writing the new properties was interrupted.
+    retired, current = set(), set()
+    try:
+        properties = records.properties(directory / 'properties.json', harness_optional=True)
+        rows = sessions.journal(directory)
+    except records.RecordError:
+        return None  # An unreadable journal cannot prove a copy still belongs here.
+    retirement = properties.get('native_session_transition')
+    if retirement and not any(row['id'] == retirement and row.get('kind') == 'fresh-start' for row in rows):
+        return None  # A missing or truncated journal cannot undo a recorded retirement.
+    for row in rows:
+        if row['from'] is not None:
+            current.add(row['from'])
+        if row.get('kind') == 'fresh-start':
+            retired.update(current)
+            current.clear()
+        if row['to'] is not None:
+            current.add(row['to'])
+    return retired - current
+
+
+def _copy_in_lineage(message, state, retired):
+    target = state.get('target_session') or message.get('target_session')
+    if not target:
+        return True
+    excluded = retired()
+    return isinstance(target, str) and excluded is not None and target not in excluded
+
+
+def _failed_inbox_status(message, state, retired):
+    if _failed_copy(message, state) and _copy_in_lineage(message, state, retired):
+        return 'read' if _dated(state.get('inbox_copy_read_at')) else 'waiting'
+    return None
+
+
+def failed_inbox_status(directory, message, state):
+    """The recipient's read state for an eligible definite failure."""
+    return _failed_inbox_status(message, state, lambda: _retired_targets(directory))
 
 
 def _last_receipt_value(state):
@@ -571,11 +614,13 @@ def _inbox_locked(agent_dir, *, observed_missing, limit=50, after=None, all_mess
     cursor = start
     messages, cursors = [], []
     copies = []
+    retired = cache(lambda: _retired_targets(agent_dir))
     for offset, message in records:
         state = states.get(message['id'], {})
         upgraded = inbox_copy(message, state)
         failed = _failed_copy(message, state)
-        unread_copy = (upgraded or failed) and not _dated(state.get('inbox_copy_read_at'))
+        unread_copy = ((not all_messages or unread) and (upgraded or failed) and not _dated(state.get('inbox_copy_read_at'))
+                       and _copy_in_lineage(message, state, retired))
         # Native rows may have been skipped before their evidence changed. Their original inbox input
         # remains unread independently of the cursor; no second message or native attempt is created.
         if offset <= start and (all_messages or not unread_copy):
@@ -750,6 +795,12 @@ def update_message(agent_dir, message_id, **changes):
         states = _states(agent_dir, observed_missing=observed_missing)
         before = states.get(message_id, {})
         states[message_id] = after = {**before, **changes}
+        if 'submission_state' in changes:
+            terminal = ('failed', 'cancelled')
+            if after['submission_state'] not in terminal:
+                after.pop('failed_inbox_copy', None)
+            elif before.get('submission_state') not in terminal:
+                after['failed_inbox_copy'] = True
         if (message.get('schema') == 2 and message.get('delivery') == 'follow-up'
                 and isinstance(message.get('inbox_only_text'), str)
                 and after.get('submission_state') in ('failed', 'launch-only') and not after.get('dismissed_at')):
@@ -884,7 +935,8 @@ def dismiss_messages(agent_dir, message_ids):
                                            ('inbox.cursor', 'inbox-state.json', 'native-delivery.json'))
         _, _, messages = _messages(agent_dir, observed_missing=observed_missing)
         states = _states(agent_dir, observed_missing=observed_missing)
-        dismissed = {'failures': [], 'unconfirmed': []}
+        dismissed = {'failures': [], 'unconfirmed': [], 'inbox': []}
+        retired = cache(lambda: _retired_targets(agent_dir))
         for _, message in messages:
             state = states.get(message['id'], {})
             if message['id'] not in message_ids or not dismissible(message, state):
@@ -892,6 +944,8 @@ def dismiss_messages(agent_dir, message_ids):
             states[message['id']] = {**state, 'dismissed_at': now()}
             category = 'failures' if state['submission_state'] in ('failed', 'launch-only') else 'unconfirmed'
             dismissed[category].append(message['id'])
+            if _failed_inbox_status(message, state, retired) == 'waiting':
+                dismissed['inbox'].append(message['id'])
         if any(dismissed.values()):
             write(agent_dir / 'inbox-state.json', states)
     return dismissed
@@ -958,7 +1012,8 @@ def finish_wake(directory, launch_id, message_id, started, reason='', *, uncerta
 
 def end_startup_messages(directory, launch_id, reason):
     """Fail never-submitted input and count what can be retried. Caller holds .launch.lock."""
-    failed = retryable = 0
+    failed = retryable = waiting = 0
+    retired = cache(lambda: _retired_targets(directory))
     if launch_id is not None:
         for message in inbox(directory, all_messages=True, limit=None)['messages']:
             tracking = message['tracking']
@@ -967,9 +1022,26 @@ def end_startup_messages(directory, launch_id, reason):
                 saved = update_message(directory, message['id'], submission_state='failed',
                                        attempts=[*tracking.get('attempts', []), receipt], last_receipt=receipt)
                 failed += 1
+                waiting += int(_failed_inbox_status(message, saved, retired) == 'waiting')
                 if not saved.get('dismissed_at') and not saved.get('uncheckable_reported_at'):
                     retryable += 1
-    return {'failed_startup_messages': failed, 'retryable_startup_messages': retryable}
+    return {'failed_startup_messages': failed, 'retryable_startup_messages': retryable,
+            **({'startup_messages_in_inbox': waiting} if waiting else {})}
+
+
+def cancel_delivery_messages(directory, message_ids):
+    """Record exact local cancellations and count the unread copies they leave."""
+    waiting = 0
+    retired = cache(lambda: _retired_targets(directory))
+    for message_id in dict.fromkeys(message_ids):
+        try:
+            message, _ = message_record(directory, message_id)
+        except ValueError:
+            continue  # Native input from another client is not a core inbox record.
+        saved = update_message(directory, message_id, submission_state='cancelled', cancelled_at=now(),
+                               last_receipt={'state': 'unavailable', 'reason': 'Cancelled by explicit agent stop'})
+        waiting += int(_failed_inbox_status(message, saved, retired) == 'waiting')
+    return {'cancelled_messages_in_inbox': waiting} if waiting else {}
 
 
 def unread_senders(directory):

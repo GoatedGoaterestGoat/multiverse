@@ -348,7 +348,8 @@ class MessagingCliTest(BaseTest):
                     self.output('send', 'third', '--text', 'wake message', code=1)
                     self.assertEqual(self.stderr.strip(),
                         f'Not delivered to third: Could not wake agent: {reason} Saved; fix the reason, '
-                        'then mv2 deliver third --retry or --dismiss.')
+                        'then mv2 deliver third --retry or --dismiss. '
+                        "It is waiting in third's inbox. A retry submits it as a prompt if it is still unread.")
                     self.assertEqual(self.history('third')[-1]['tracking']['attempts'][-1]['reason'],
                                      'Could not wake agent: ' + diagnostic)
                     record = json.loads(self.output('send', 'third', '--text', 'wake message', '--json', code=1))

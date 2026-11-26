@@ -1,12 +1,13 @@
 """Conversation ownership and append-first session lineage. No provider discovery."""
 from contextlib import contextmanager
+from io import TextIOWrapper
 import json
 import os
 from pathlib import Path
 import stat
 
 from ..harnesses.types import normalize_session_id
-from ..store import retry_missing, lock, now, read, uid, write
+from ..store import retry_missing, lock, now, open_regular, read, uid, write
 from . import parent, tree, records
 
 
@@ -106,7 +107,7 @@ def journal(directory, *, observed_missing=()):
     rows, identities = [], set()
     try:
         # The journal is append-only: absence is not an atomic-replacement gap.
-        with path.open() as stream:
+        with open_regular(path) as binary, TextIOWrapper(binary, encoding='utf-8') as stream:
             while line := stream.readline(16385):
                 if not line.endswith('\n') or len(line) > 16384:
                     raise ValueError('incomplete or oversized row')
