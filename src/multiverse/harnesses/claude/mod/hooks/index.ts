@@ -4,6 +4,7 @@ import { DESCRIPTION, HINT, NAME, registerMultiverse } from './multiverse'
 import { INBOX_LIMIT, currentLine, defaultConfig, isSubverse, parseConfig, parseItems, render, setBase } from './statusline'
 import type { Config, Facts, PluginItem } from './statusline'
 import { pythonEnv } from './python'
+import { PRUNE_EVERY, prune } from './prune'
 import { retryMissing } from './records'
 import { registerUsage } from './usage'
 import { type Transition, closeAll, closeKeys, form, hold as holdPrompt, sweep, transitions } from './prompts'
@@ -866,11 +867,20 @@ async function storedLine($: EngineInterface, name: string, watch: Watch): Promi
 }
 const startsWith = (text: string, name: string) => text.includes(`<command-name>/${name}</command-name>`)
 
+// mv2 slash's records: the adapter removes a list's once it has read it; a run's it reads and core keeps the outcome,
+// so they are kept as prune.ts keeps the mod's records, as the prompts' end records are.
+const COMMAND_RECORD = /^[0-9a-f-]{36}\.json$/
+let commandsSincePrune = PRUNE_EVERY  // a load's first record prunes, so a folder left long grows no further
+
 async function commandRecord($: EngineInterface, id: string, record: Record<string, unknown>) {
   const directory = await $.env.get("MV2_AGENT_DIR")
   if (!directory) return
   const at = await $.clock.now()
   await $.fs.write(`${directory}/claude-commands/${id}.json`, JSON.stringify({ id, ...record, at }) + "\n")
+  if (++commandsSincePrune >= PRUNE_EVERY) {
+    commandsSincePrune = 0
+    await prune($, `${directory}/claude-commands`, COMMAND_RECORD)
+  }
 }
 
 // Claude's own list of the commands the person can run now, for `mv2 slash AGENT --list`. Answered at once.
