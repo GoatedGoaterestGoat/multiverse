@@ -5,7 +5,7 @@ import type { EngineInterface, On } from 'claude-code'
 //   /multiverse <name> [args]        that command, workflow or skill, submitted as the
 //                                    person's own prompt (what `mv2 command` prints)
 //   /multiverse send <agent> <text>  a message to another agent, sent as this agent; the
-//                                    result is `mv2 send`'s own text
+//                                    result names it, then gives `mv2 send`'s own text
 //   /multiverse inbox                this agent's unread inbox-only messages, which
 //                                    this marks read (`mv2 inbox --json`, parsed here)
 //
@@ -107,10 +107,13 @@ export function registerMultiverse(on: On) {
 
     if (parsed.kind === "send") {
       // With this session's own MV2_AGENT_ID, so the recipient reads "Message from <this agent>".
-      // The CLI's own words are the result: what was delivered, or what was saved and why not delivered
-      // (stdout, with exit 1), or why the send could not start (stderr).
+      // The CLI's own words follow: what was delivered, or what was saved and why not delivered
+      // (stdout, with exit 1), or why the send could not start (stderr). Claude stores a plugin
+      // command without its arguments (2.1.330 to 2.1.332), so the first line is the only place
+      // the model sees what was sent as it.
       const result = await mv2($, cli, ["send", parsed.agent, `--text=${parsed.text}`])
-      return { text: result.out.trim() || result.err || "mv2 send printed nothing." }
+      const said = result.out.trim() || result.err || "mv2 send printed nothing."
+      return { text: `Message to ${parsed.agent}, as this agent: ${parsed.text}\n${said}` }
     }
 
     const result = await mv2($, cli, ["command", parsed.name, ...(parsed.args ? ["--", parsed.args] : [])])

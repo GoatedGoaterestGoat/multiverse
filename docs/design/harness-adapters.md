@@ -1730,8 +1730,10 @@ typeahead with an argument hint, and runnable while a turn is running):
 - `/multiverse send <agent> <text>` runs `mv2 send` with this session's own
   `MV2_AGENT_ID`, so the recipient reads `Message from <this agent>`. The person
   types it to speak as this agent; to message an agent as themselves they type to
-  it directly or run `mv2 send` from a shell. The result is `mv2 send`'s own text,
-  shown as printed: what was delivered, or what was saved and why it was not.
+  it directly or run `mv2 send` from a shell. The result names the recipient and
+  the text, then gives `mv2 send`'s own text as printed: what was delivered, or
+  what was saved and why it was not. Claude stores a plugin command without its
+  arguments, so that first line is the only place the model sees what was sent.
 - `/multiverse inbox` is a normal `mv2 inbox --json` read (the mod parses the JSON
   and formats it; the CLI's default output is readable text for people): it shows
   this agent's unread inbox messages and marks them read. The output is
