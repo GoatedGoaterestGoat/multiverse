@@ -2,6 +2,7 @@
 import argparse
 import json
 import os
+import shlex
 import sys
 import time
 from pathlib import Path
@@ -11,7 +12,7 @@ from ..plugins import access as levels, loader, manifest as manifests, settings 
 from ..store import is_file_replaced
 
 ACTIONS = ("list", "info", "enable", "disable", "grant", "settings", "trust", "untrust", "check", "host", "events",
-           "install", "update", "remove", "migrate", "new", "packages", "secrets", "secret")
+           "install", "update", "remove", "migrate", "new", "packages", "secrets", "secret", "prune")
 HOST_ACTIONS = ("status", "start", "stop")
 NAMED = ("info", "enable", "disable", "grant", "settings", "trust", "untrust", "packages", "secrets", "secret")
 
@@ -19,10 +20,11 @@ NAMED = ("info", "enable", "disable", "grant", "settings", "trust", "untrust", "
 def configure(parser):
     parser.add_argument("plugin_action", nargs="?", default="list", choices=ACTIONS, metavar="ACTION",
                         help="list (default), info, enable, disable, grant, settings, trust, untrust, check, host, "
-                             "events, install, update, remove, migrate, new, packages, secrets or secret")
+                             "events, install, update, remove, migrate, new, packages, secrets, secret or prune")
     parser.add_argument("name", nargs="?", help="The plugin (for check: its directory; for host: start, stop or status; "
                                                "for new: the new plugin's name; for install: a git URL[@REF][#PATH] "
-                                               "or a plugin's folder; for update: NAME[@REF])")
+                                               "or a plugin's folder; for update: NAME[@REF]; for prune: the plugin "
+                                               "folders whose records to remove, if any)")
     parser.add_argument("level", nargs="?", metavar="LEVEL", help="grant: observe, spend or act; secret: the KEY")
     # Words past these are refused by run() without repeating them: `secret NAME KEY VALUE` must never echo VALUE.
     parser.add_argument("extra", nargs="*", help=argparse.SUPPRESS, metavar=argparse.SUPPRESS)
@@ -48,7 +50,8 @@ def configure(parser):
     parser.add_argument("--here", action="store_true",
                         help="install, update, remove: in this universe's plugins/, not your personal plugins")
     parser.add_argument("--yes", action="store_true",
-                        help="install, update: go ahead without asking (the person only), after showing what it is")
+                        help="install, update, prune: go ahead without asking (the person only), after showing what it "
+                             "is")
     parser.add_argument("--json", action="store_true", help="Print the full result as JSON")
 
 
@@ -83,6 +86,8 @@ def run(root=None, *, plugin_action="list", name=None, assignments=(), removals=
     `secret_value` comes only from cli_run's hidden prompt or stdin, never from an argument."""
     if plugin_action not in ACTIONS:
         raise ValueError(f"Unknown plugins action {plugin_action!r}; use one of {', '.join(ACTIONS)}")
+    if plugin_action == "prune":
+        return _prune(root, [word for word in (name, level, *extra) if word], yes)
     if extra:  # never repeated: for secret, it may be the value itself
         if plugin_action == "secret":
             raise ValueError(f"mv2 plugins secret never takes a value as an argument, so nothing was saved and it "
@@ -290,6 +295,10 @@ def run(root=None, *, plugin_action="list", name=None, assignments=(), removals=
         # approved here: that folder, whichever copy this process finds first.
         recorded = registry.read(root).get(name, {}).get("directory")
         if (record is None or record["placement"] != "personal") and recorded is None:
+            if plugin_action == "untrust" and found.directory:
+                raise ValueError(f"{name} is a {found.source} plugin, which nothing here trusts by name; to remove "
+                                 f"the records mv2 keeps for its folder: mv2 plugins prune "
+                                 f"{shlex.quote(str(found.directory))}")
             raise ValueError(f"{name} is a {found.source} plugin; only plugins in a universe's plugins/ need trust")
         if plugin_action == "untrust" and record is not None:
             # An installed plugin is pinned at its content: untrusting it would leave it unpinned, not stopped.
@@ -449,15 +458,19 @@ def cli_run(root=None, *, plugin_action="list", name=None, assignments=(), remov
         asked = _ask_install(root, plugin_action, name, here)
         if asked is not None:
             return text(plugin_action, asked)
+    if plugin_action == "prune" and not yes and not json:
+        asked = _ask_prune(root, [word for word in (name, level, *extra) if word])
+        if asked is not None:
+            return text(plugin_action, asked)
     result = run(root, plugin_action=plugin_action, name=name, assignments=assignments, removals=removals, prune=prune,
                  apply=apply, recursive=recursive, directory=directory, load=load, level=level, grant=grant,
                  install_packages=install_packages, approved=approved, clear=clear, secret_value=secret_value,
                  extra=extra, here=here, yes=yes)
     if json:
         return result
-    if plugin_action in ("install", "update") and result.get("needs_yes"):
+    if plugin_action in ("install", "update", "prune") and result.get("needs_yes"):
         print(text(plugin_action, result))
-        raise SystemExit(1)  # shown, not installed: there was no terminal to ask on
+        raise SystemExit(1)  # shown, not done: there was no terminal to ask on
     if plugin_action in ("check", "migrate") and result.get("ok") is False:
         print(text(plugin_action, result))
         raise SystemExit(1)  # a failed check, or a migration that did not apply
@@ -489,6 +502,86 @@ def _installer(root, action, name, here, yes, shown=None, printed=False):
         return {"action": action, "preview": shown, "result": None, "needs_yes": True}
     return {"action": action, "preview": shown, "result": plugins.install_confirm(shown["key"], selected),
             "printed": printed}
+
+
+def _prune(root, folders, yes, shown=None):
+    """mv2 plugins prune (the person only): what it would remove, removed only with `yes` (cli_run asks on a
+    terminal and passes the `shown` plan, so only what was shown is removed)."""
+    from ..plugins import leftovers
+    if plugins.from_agent(_selected(root)):
+        raise ValueError("Only the person removes plugin records: ask them to run mv2 plugins prune"
+                         + "".join(" " + shlex.quote(folder) for folder in folders))
+    plan = shown if shown is not None else leftovers.find(folders)
+    if leftovers.empty(plan):
+        return {"action": "prune", "plan": plan, "result": None}
+    if not yes:
+        return {"action": "prune", "plan": plan, "result": None, "needs_yes": True}
+    return {"action": "prune", "plan": plan, "result": leftovers.remove(plan)}
+
+
+def _ask_prune(root, folders):
+    """On a terminal, for a person: show what prune would remove and ask. The result (cli_run prints it), or None
+    when there's nothing to ask here (no terminal, an agent): run() decides."""
+    from ..plugins import leftovers
+    if plugins.from_agent(_selected(root)) or not (sys.stdin.isatty() and sys.stdout.isatty()):
+        return None
+    plan = leftovers.find(folders)
+    if leftovers.empty(plan):
+        return {"action": "prune", "plan": plan, "result": None}
+    print(prune_text(plan))
+    try:
+        answer = input("Remove them? [y/N] ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        answer = ""  # no answer is a no
+        print()
+    if answer not in ("y", "yes"):
+        print("Nothing removed.")
+        raise SystemExit(1)
+    return _prune(root, folders, True, plan)
+
+
+def _count(number, one, many=None):
+    return f"{number} {one if number == 1 else (many or one + 's')}"
+
+
+def _listed(parts):
+    """`parts` with a count above 0, as one phrase: "a, b and c"."""
+    shown = [part for number, part in parts if number]
+    return ", ".join(shown[:-1]) + (" and " if len(shown) > 1 else "") + shown[-1] if shown else ""
+
+
+def _caches(plan, gone):
+    return _listed([(len(plan["memos"]), _count(len(plan["memos"]), "fingerprint memo")),
+                    (len(plan["copies"]), _count(len(plan["copies"]), "cached copy", "cached copies")),
+                    (len(plan["environments"]), _count(len(plan["environments"]), "package scan")
+                     + (" of a Python" if len(plan["environments"]) == 1 else " of Pythons")
+                     + (gone if len(plan["environments"]) != 1 else gone.replace(" are ", " is ")))])
+
+
+def prune_text(plan):
+    """What prune would remove, for the person to say yes to: every trust pin by its folder, the rest counted."""
+    lines = []
+    if not leftovers_empty(plan):
+        where = (" at or under " + ", ".join(_shown(folder) for folder in plan["folders"]) if plan["folders"]
+                 else " that are gone")
+        lines.append(f"mv2 keeps these records in {_shown(str(trust.user_directory()))} for plugin folders{where}:")
+        if plan["pins"]:
+            lines.append(f"  Trust for {_count(len(plan['pins']), 'plugin folder')}, which "
+                         f"{'would' if len(plan['pins']) == 1 else 'would each'} need mv2 plugins trust again to run:")
+            lines.extend(f"    {_shown(item['path'])}" + (" (gone)" if item["gone"] else "") for item in plan["pins"])
+        caches = _caches(plan, " under them" if plan["folders"] else " that are gone")
+        if caches:
+            lines.append(f"  {'Also ' if plan['pins'] else ''}{caches}.")
+        lines.append("  The plugin folders and their files, and every other plugin's records, stay as they are.")
+    if plan["left"]:
+        lines.append("Left as they are:")
+        lines.extend(f"  {_shown(item['path'])}: {item['why']}" for item in plan["left"])
+    return "\n".join(lines)
+
+
+def leftovers_empty(plan):
+    from ..plugins import leftovers
+    return leftovers.empty(plan)
 
 
 def _ask_install(root, action, name, here):
@@ -736,6 +829,26 @@ def _state(item):
 
 
 def text(action, result):
+    if action == "prune":
+        plan, done = result["plan"], result["result"]
+        if done is None and leftovers_empty(plan):
+            where = (" at or under " + ", ".join(_shown(folder) for folder in plan["folders"]) if plan["folders"]
+                     else " for plugin folders that are gone")
+            return "\n".join([f"No plugin records to remove{where}.",
+                               *(f"Left as it is: {_shown(item['path'])}: {item['why']}" for item in plan["left"])])
+        if done is None:
+            return prune_text(plan) + ("\nNothing removed: no terminal to ask on. Run it again with --yes to go ahead."
+                                       if result.get("needs_yes") else "")
+        removed = _listed([(len(done["pins"]), _count(len(done["pins"]), "trust pin")),
+                           (len(done["memos"]), _count(len(done["memos"]), "fingerprint memo")),
+                           (len(done["copies"]), _count(len(done["copies"]), "cached copy", "cached copies")),
+                           (len(done["environments"]), _count(len(done["environments"]), "package scan"))])
+        lines = [f"Removed {removed}." if removed else "Nothing removed: each record had changed since it was listed."]
+        left = [*(item for item in plan["left"]), *done["left"]]
+        if left:
+            lines.append("Left as they are:")
+            lines.extend(f"  {_shown(item['path'])}: {item['why']}" for item in left)
+        return "\n".join(lines)
     if action == "list":
         rows = result["plugins"]
         if not rows:

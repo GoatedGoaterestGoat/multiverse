@@ -434,13 +434,23 @@ def _installed_entries(entry):
 
 
 def _write_installed(path, data, key, entries):
-    from ..store import write
+    """Write this Python's scan, under the file's lock, into what the file holds now: another Python's scan written
+    since, or an entry mv2 plugins prune removed since `data` was read, is kept as it is (`data` is used only when
+    the file can't be read now)."""
+    from ..store import lock, read, write
     try:
-        environments = data.get("environments") if isinstance(data, dict) else None
-        environments = environments if isinstance(environments, dict) else {}
-        entries = sorted(entries, key=lambda item: item.get("used", 0), reverse=True)
-        environments[key] = {**entries[0], "recent": entries[1:]}
-        write(path, {"schema": 1, "environments": environments})
+        with lock(path.with_name(f".{INSTALLED}.lock")):
+            try:
+                data = read(path)
+            except FileNotFoundError:
+                data = {}
+            except (OSError, ValueError):
+                pass
+            environments = data.get("environments") if isinstance(data, dict) else None
+            environments = environments if isinstance(environments, dict) else {}
+            entries = sorted(entries, key=lambda item: item.get("used", 0), reverse=True)
+            environments[key] = {**entries[0], "recent": entries[1:]}
+            write(path, {"schema": 1, "environments": environments})
     except (OSError, ValueError, IndexError):
         pass  # unremembered: scanned again next time
 

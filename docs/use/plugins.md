@@ -189,6 +189,22 @@ A repository can carry plugins in its `.multiverse/plugins/`, and cloning the re
 - mv2 runs a copy of exactly the files you trusted, kept in `~/.multiverse/plugin-cache/`. If that copy's files are edited, the plugin is listed as changed and doesn't run; the problem names the copy to remove, and mv2 then makes it again from the trusted plugin.
 - Only universe plugins need trust. The other sources hold code that you or mv2 installed.
 
+### Remove the records of plugins you no longer use
+
+```sh
+mv2 plugins prune                       # the records of plugin folders that are gone
+mv2 plugins prune ~/old/run-copy        # the records of plugins at or under a folder, gone or not
+```
+
+mv2 keeps records in `~/.multiverse` for each plugin folder it trusted or pinned: the pin, a fingerprint memo and a cached copy, plus a package scan for each Python that ran mv2. Deleting a plugin's folder, or a whole universe or run copy, leaves them. `mv2 plugins prune` lists what it would remove and asks; with no terminal, add `--yes`. With `--json` and no `--yes`, it only shows the list.
+
+- It never touches a plugin's folder or its files, another folder's records, or a cached copy that another trusted plugin still uses.
+- A cached copy that something used in the last 14 days may be a running plugin's files, so it stays, as after `untrust`. mv2 removes it at a later cache prune, once nothing has used it for 14 days.
+- It leaves a plugin that `mv2 plugins install` placed and names `mv2 plugins remove` for it. It also leaves anything trusted again after the list was shown. Whatever it leaves keeps its fingerprint memo, so mv2 doesn't hash it again.
+- A plugin whose trust it removes needs `mv2 plugins trust` before it runs again. A path plugin that's off is pinned again when you turn it on.
+- Only the person runs it. `mv2 plugins untrust` of a path plugin names the `prune` command for its folder, since nothing trusts a path plugin by name.
+- If `~/.multiverse/trusted-plugins.json` is there but can't be read, `prune` removes nothing, as `trust` does.
+
 Trust and permissions are not a sandbox. A plugin runs with your permissions. The permissions that `enable` lists are what the plugin asked for. Anything running as you, including an agent, can run `mv2 plugins trust`.
 
 ## The plugin host

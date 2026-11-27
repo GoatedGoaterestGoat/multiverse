@@ -591,8 +591,8 @@ mv2 plugins [--grant {observe,spend,act}] [--set KEY=VALUE] [--unset KEY] [--pru
 
 | Argument | Value | Description | Default |
 | --- | --- | --- | --- |
-| `ACTION` |  | list (default), info, enable, disable, grant, settings, trust, untrust, check, host, events, install, update, remove, migrate, new, packages, secrets or secret | `list` |
-| `name` |  | The plugin (for check: its directory; for host: start, stop or status; for new: the new plugin's name; for install: a git URL[@REF][#PATH] or a plugin's folder; for update: NAME[@REF]) |  |
+| `ACTION` |  | list (default), info, enable, disable, grant, settings, trust, untrust, check, host, events, install, update, remove, migrate, new, packages, secrets, secret or prune | `list` |
+| `name` |  | The plugin (for check: its directory; for host: start, stop or status; for new: the new plugin's name; for install: a git URL[@REF][#PATH] or a plugin's folder; for update: NAME[@REF]; for prune: the plugin folders whose records to remove, if any) |  |
 | `LEVEL` |  | grant: observe, spend or act; secret: the KEY |  |
 | `--grant` | `observe`, `spend`, `act` | enable: the access level to grant it here (otherwise a terminal asks; without one, its minimum) |  |
 | `--set` | `KEY=VALUE` | settings: change one setting (VALUE is JSON, or else text); repeatable |  |
@@ -605,5 +605,5 @@ mv2 plugins [--grant {observe,spend,act}] [--set KEY=VALUE] [--unset KEY] [--pru
 | `--install-packages` |  | enable, packages: install the plugin's Python packages without asking (the person only) |  |
 | `--clear` |  | secret: remove this universe's value (a parent's, if set, is used again) |  |
 | `--here` |  | install, update, remove: in this universe's plugins/, not your personal plugins |  |
-| `--yes` |  | install, update: go ahead without asking (the person only), after showing what it is |  |
+| `--yes` |  | install, update, prune: go ahead without asking (the person only), after showing what it is |  |
 | `--json` |  | Print the full result as JSON |  |

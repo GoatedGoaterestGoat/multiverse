@@ -1,9 +1,11 @@
 """Trust for a universe's own plugins covers every file that can run, and what runs is the trusted copy (PR #20, item 1)."""
 import argparse
 import importlib.util
+import json
 import os
 from pathlib import Path
 import py_compile
+import shutil
 import subprocess
 import sys
 import time
@@ -11,7 +13,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from multiverse import plugins
-from multiverse.plugins import harness, loader, trust
+from multiverse.plugins import harness, installer, leftovers, loader, trust
 from multiverse.plugins.testing import PluginTestCase
 from multiverse.tools import plugins as tool
 
@@ -295,3 +297,98 @@ class CacheCleanupTest(PluginTestCase):
         os.utime(kept / trust.COMPLETE, (old, old))
         trust.prune_cache()
         self.assertFalse(kept.exists())
+
+
+class PruneTest(PluginTestCase):
+    def made(self, where, name, extra=""):
+        files = {"plugin.py": HARMLESS + extra}
+        if name == "inst":
+            files[installer.MARKER] = json.dumps({"install": "x"})
+        directory = self.write_plugin(name, None, files, where=where)
+        copy = trust.cached(directory, trust.trust(directory))
+        old = time.time() - (trust.UNUSED_DAYS + 1) * 86400  # nothing used it lately: free to go
+        os.utime(copy / trust.COMPLETE, (old, old))
+        return directory
+
+    def pins(self):
+        return set(trust._records())
+
+    def test_prune_removes_only_the_records_of_folders_gone_or_named(self):
+        """mv2 plugins prune removes the records of plugin folders that are gone or named, each only as it was
+        listed, never an installed plugin's, another folder's, or a copy another pin still uses; a break drops
+        someone's trust unseen, or leaves records nothing else can clear."""
+        qa, home = self.work / "qa", trust.user_directory()
+        a_q = self.made(qa / "run-a" / "plugins", "qa-q")
+        b_q = self.made(qa / "run-b" / "plugins", "qa-q", "# b\n")
+        a_a = self.made(qa / "run-a" / "plugins", "qa-a", "# a\n")
+        b_a = self.made(qa / "run-b" / "plugins", "qa-a", "# b\n")  # its copy used just now, as by a running host
+        inst = self.made(qa / "run-a" / "plugins", "inst", "# i\n")
+        keep = self.made(self.work / "keep" / "plugins", "qa-q")  # a_q's very bytes: they share one copy
+        near = self.made(self.work / "qa-other" / "plugins", "x")  # /qa-other isn't under /qa
+        gone = self.made(self.work / "gone" / "plugins", "g1", "# g\n")
+        values = {str(path): trust._records()[str(path)]["fingerprint"]
+                  for path in (a_q, b_q, a_a, b_a, keep, gone)}
+        os.utime(trust.cache_directory(values[str(b_a)]) / trust.COMPLETE)
+        shutil.rmtree(self.work / "gone")
+        scans = home / loader.INSTALLED
+        old_python, scan = str(self.work / "gone-venv" / "bin" / "python"), {"signature": [], "directories": []}
+        scans.write_text(json.dumps({"schema": 1, "environments": {old_python: scan, sys.executable: scan}}))
+        copy = lambda path: trust.cache_directory(values[str(path)])
+        memo = lambda path: trust.COPY_MEMO + str(copy(path).resolve())  # a copy's own memo, not a folder's
+        for path in (keep, gone, a_a, b_q):
+            trust._remember(memo(path), "signature", values[str(path)])
+        with self.subTest("records of folders that are gone"):
+            plan = leftovers.find()
+            self.assertEqual([item["path"] for item in plan["pins"]], [str(gone)])
+            self.assertEqual((plan["copies"], plan["environments"]), ([str(copy(gone))], [old_python]))
+            self.assertEqual({key for key in plan["memos"] if key.startswith(trust.COPY_MEMO)}, {memo(gone)})
+            self.assertIn(str(gone), plan["memos"])
+            leftovers.remove(plan)
+            self.assertEqual(self.pins(), {str(path) for path in (a_q, b_q, a_a, b_a, inst, keep, near)})
+            self.assertFalse(copy(gone).exists())
+            self.assertNotIn(str(gone), trust._fingerprints())
+            self.assertIn(memo(keep), trust._fingerprints())
+            self.assertEqual(set(json.loads(scans.read_text())["environments"]), {sys.executable})
+        with self.subTest("records at or under a named folder, each only as listed"):
+            link = self.work / "qa-link"  # the folder named by another spelling: where it leads counts too
+            link.symlink_to(qa, target_is_directory=True)
+            plan = leftovers.find([link])
+            self.assertEqual({item["path"] for item in plan["pins"]}, {str(a_q), str(b_q), str(a_a), str(b_a)})
+            self.assertEqual(sorted(plan["copies"]), sorted([str(copy(b_q)), str(copy(a_a))]))  # not keep's
+            why = {item["path"]: item["why"] for item in plan["left"]}
+            self.assertIn("mv2 plugins remove inst", why[str(inst)])
+            self.assertIn("used in the last", why[str(copy(b_a))])  # a running plugin's files stay
+            (b_q / "plugin.py").write_text(HARMLESS + "# trusted again\n")
+            trust.trust(b_q)  # between the listing and the yes: that new approval stays
+            os.utime(copy(a_a) / trust.COMPLETE)  # and a listed copy is used meanwhile: it stays too
+            done = leftovers.remove(plan)
+            self.assertNotIn(str(copy(a_a)), done["copies"])
+            self.assertFalse(copy(b_q).exists())  # unused and named by no pin now (trust's own cache prune may beat it)
+            self.assertEqual(set(done["pins"]), {str(a_q), str(a_a), str(b_a)})
+            self.assertEqual(self.pins(), {str(b_q), str(inst), str(keep), str(near)})
+            self.assertTrue(copy(keep).exists() and copy(b_a).exists() and copy(a_a).exists())
+            self.assertTrue(all(path.is_dir() for path in (a_q, b_q, a_a, inst)))  # the folders themselves stay
+            memos = trust._fingerprints()  # a memo goes only with what it describes: kept ones aren't hashed again
+            self.assertIn(str(b_q), memos)  # its pin, trusted again, stays
+            self.assertIn(memo(a_a), memos)  # its copy, used meanwhile, stays
+            self.assertFalse({str(a_q), str(a_a), memo(b_q)} & set(memos))  # theirs went
+            self.assertEqual(set(done["memos"]), {str(a_q), str(a_a), str(b_a), memo(b_q)})
+        with self.subTest("a scan written from before a prune leaves it pruned"):
+            stale = {"schema": 1, "environments": {old_python: scan, sys.executable: scan}}  # read before it
+            loader._write_installed(scans, stale, sys.executable, [{**scan, "signature": ["fresh"]}])
+            self.assertEqual(set(json.loads(scans.read_text())["environments"]), {sys.executable})
+        with self.subTest("the command shows first, and only for the person"):
+            asked = tool.run(self.root, plugin_action="prune", name=str(near))
+            self.assertTrue(asked["needs_yes"])
+            self.assertIn(str(near), self.pins())
+            with mock.patch.object(plugins, "from_agent", return_value=True):
+                with self.assertRaisesRegex(ValueError, "Only the person"):
+                    tool.run(self.root, plugin_action="prune", name=str(near), yes=True)
+            self.assertIn(str(near), self.pins())
+            tool.run(self.root, plugin_action="prune", name=str(near), yes=True)
+            self.assertNotIn(str(near), self.pins())
+        with self.subTest("a trust map that can't be read: nothing is decided"):
+            (home / trust.FILE).write_bytes(b"{")
+            with self.assertRaises(trust.MapUnreadable):
+                tool.run(self.root, plugin_action="prune", name=str(qa), yes=True)
+            self.assertEqual((home / trust.FILE).read_bytes(), b"{")

@@ -31,6 +31,7 @@ FINGERPRINTS = "plugin-fingerprints.json"
 UNUSED_DAYS = 14  # a copy nothing trusts and nothing used for this long is removed
 STAGING_HOURS = 1  # a copy still being made after this long was left by a process that died  # each trusted directory's fingerprint, by the signature of its files
 COMPLETE = ".mv2-complete"
+COPY_MEMO = "copy:"  # in plugin-fingerprints.json: a cached copy's own memo, by its path
 LISTED = ".mv2-files"  # in a copy: the files it was made with, which must stay exactly as trusted
 # Not part of a plugin: version control, and the caches Python and test tools write while a plugin is developed or
 # its tests run. None of it runs: mv2 runs a trusted plugin from a copy that leaves these out too, and Python
@@ -406,7 +407,7 @@ def _copy_intact(target, value):
         status = os.lstat(target / name)
         stats.update(f"{name}\0{status.st_size}\0{status.st_mtime_ns}\0{status.st_ctime_ns}\0"
                      f"{status.st_ino}\0{status.st_mode}\n".encode())
-    key = "copy:" + str(target.resolve())
+    key = COPY_MEMO + str(target.resolve())
     record = _fingerprints().get(key)
     if isinstance(record, dict) and record.get("signature") == stats.hexdigest():
         return record.get("fingerprint") == value
@@ -414,6 +415,18 @@ def _copy_intact(target, value):
     if found is not None:
         _remember(key, stats.hexdigest(), found)
     return found == value
+
+
+def used_lately(copy):
+    """Whether something used the cached copy at `copy` within UNUSED_DAYS (a launch or load marks the copy it
+    uses), as far as can be told: a copy whose times can't be read counts as used. Such a copy may be what a
+    running plugin's files are, so nothing removes it yet."""
+    try:
+        marker = Path(copy) / COMPLETE
+        used = marker.stat().st_mtime if marker.is_file() else Path(copy).stat().st_mtime
+    except OSError:
+        return True
+    return time.time() - used < UNUSED_DAYS * 86400
 
 
 def prune_cache():
@@ -439,11 +452,8 @@ def prune_cache():
                     continue
             elif "sha256:" + path.name in trusted:
                 continue
-            else:
-                marker = path / COMPLETE
-                used = marker.stat().st_mtime if marker.is_file() else path.stat().st_mtime
-                if now_ - used < UNUSED_DAYS * 86400:
-                    continue
+            elif used_lately(path):
+                continue
             shutil.rmtree(path)
             removed.append(path)
         except OSError:
