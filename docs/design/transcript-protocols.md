@@ -305,7 +305,12 @@ rows through this protocol, with `transcripts.read`.
   straight to the file). `resolved` is true when mv2 proved all three; false
   when it couldn't, and then they are null. An unresolved event is published
   anyway, in its place, never dropped; a plugin pairs a null-turn start and
-  end by order, since a conversation runs one turn at a time.
+  end by order, since a conversation runs one turn at a time. A compaction run
+  mid-turn can cut the running turn's opening row out of the history, which
+  then starts at the compaction's summary, so the rest of that turn is the new
+  history's preamble. A join or end of that turn still names the turn its
+  start named, and its `ref` and `generation` name its row in the new history,
+  so a plugin matches it to the start it saw and reads the reply from there.
 - `source` is `person` (typed in the terminal), `mv2` (an input mv2 delivered:
   a message, including the one a wake starts the resumed session with, a
   plugin's send, an answer, a command run with `mv2 slash`, the launch's task)

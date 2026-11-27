@@ -70,9 +70,13 @@ def parse(value):
         raise ValueError('Invalid turn-event metadata') from None
 
 
+def _resolved(data):
+    return all(isinstance(data.get(key), str) and data[key] for key in ('turn', 'ref', 'generation'))
+
+
 def public(data):
     """Expose a cursor only when all its public references were proved."""
-    if all(isinstance(data.get(key), str) and data[key] for key in ('turn', 'ref', 'generation')):
+    if _resolved(data):
         return {**data, 'resolved': True}
     return {**data, 'turn': None, 'ref': None, 'generation': None, 'resolved': False}
 
@@ -260,6 +264,9 @@ def reduce(turns, edge, reference, *, message=None, mv2=False, task_launch=False
     recent = turns.get('recent', {})
     same = active is not None and active['identity'] == edge.turn
     data = {'turn': reference.turn, 'ref': reference.ref, 'generation': reference.generation}
+    if reference.turn is None and reference.ref is not None and not isinstance(edge, TurnStarted):
+        # Compaction can leave the row on the history but move the opening out of it.
+        data['turn'] = turns.get('starts', {}).get(edge.turn)
     if isinstance(edge, TurnEnded):
         end = [edge.ref, edge.state]
         if end in recent.get(edge.turn, ()):
@@ -287,6 +294,12 @@ def reduce(turns, edge, reference, *, message=None, mv2=False, task_launch=False
     preceding = close_active(turns)
     kind = reference.kind or edge.kind
     turns['active'] = {'identity': edge.turn, 'turn': reference.turn, 'kind': kind}
+    # The outbox commits this proof with the start and clears it at launch or conversation boundaries.
+    if _resolved(data):
+        starts = turns.setdefault('starts', {})
+        starts[edge.turn] = reference.turn
+        if len(starts) > _RECENT_LIMIT:
+            del starts[next(iter(starts))]
     first_task = task_launch and edge.first_task and not turns.get('task_seen', False)
     if first_task or (wake and mv2):
         turns['task_seen'] = True

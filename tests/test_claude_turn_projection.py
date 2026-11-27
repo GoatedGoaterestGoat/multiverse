@@ -10,7 +10,7 @@ from multiverse.harnesses.claude import transcripts as claude
 from multiverse.harnesses.types import TurnEnded, TurnJoined, TurnStarted
 from multiverse.plugins import events
 from multiverse.plugins.testing import ClaudeRows
-from multiverse.runtime import transcripts, turn_events
+from multiverse.runtime import prompt_events, transcripts, turn_events
 from multiverse.store import read, write
 from multiverse.tools import runtime_update
 from test_multiverse import BaseTest
@@ -72,6 +72,76 @@ class ClaudeTurnProjectionTest(BaseTest):
         ))
         wrong = TurnEnded(turn=first, ref=second, kind='prompt', state='finished')
         self.assertIsNone(self.adapter.turn_cursor_projection(self.session, (wrong,)))
+
+    def test_mid_turn_compaction_uses_the_published_opening_and_current_row_cursors(self):
+        """A compaction can put a running turn's reply in the preamble even when its start already published."""
+        for opener in ('resolved', 'no row', 'row from another turn'):
+            with self.subTest(opener=opener):
+                self.path.unlink(missing_ok=True)
+                fixture = ClaudeRows()
+                previous = fixture.prompt('Earlier turn')
+                fixture.response('Earlier reply')
+                fixture.turn_end()
+                first = fixture.prompt('Begin')
+                fixture.response(tool=('call', 'Read', {}))
+                fixture.tool_result('call', 'Result before the compaction')
+                self.append(*fixture.rows)
+                refs = {'resolved': first['uuid'], 'no row': None, 'row from another turn': previous['uuid']}
+                start = TurnStarted(turn=first['uuid'], ref=refs[opener], kind='prompt', source='person')
+                start_resolved = opener == 'resolved'
+                if opener == 'row from another turn':
+                    (proof,) = transcripts.turn_references(self.root, self.agent, self.launch, self.native, 0,
+                                                           (start,), storage=self.session,
+                                                           deadline=time.monotonic() + 5)
+                    self.assertEqual(proof, transcripts.TurnReference(turn=first['uuid'], kind='prompt'))
+                published = []
+
+                def journal(_, row):
+                    published.append((row['kind'], row['data']))
+                    return 'unsubscribed'
+
+                with patch.object(events, 'subscribers', return_value=['fixture']), \
+                        patch.object(prompt_events, '_journal_event', side_effect=journal):
+                    prompt_events.stage_turns(self.root, self.agent, self.launch, self.native, (start,))
+                    prompt_events.publish(self.agent, resolve_turns=True)
+                    [(_, opened)] = published
+                    self.assertEqual(opened['resolved'], start_resolved)
+                    self.assertEqual(opened['turn'], first['uuid'] if start_resolved else None)
+
+                    start_at = len(fixture.rows)
+                    fixture.compaction()
+                    continuation = fixture.add('attachment', attachment={'type': 'total_tokens_reminder'})
+                    # The automatic boundary links forward to a row stored after the summary.
+                    fixture.rows[start_at]['logicalParentUuid'] = continuation['uuid']
+                    joined = fixture.steer('One more detail')
+                    fixture.response('Final response')
+                    ended = fixture.turn_end()
+                    later = fixture.prompt('Next turn')
+                    self.append(*fixture.rows[start_at:])
+                    abandoned = TurnJoined(turn=start.turn, ref=first['uuid'], source='person')
+                    other_turn = TurnJoined(turn=start.turn, ref=later['uuid'], source='person')
+                    join = TurnJoined(turn=start.turn, ref=joined['uuid'], source='person')
+                    end = TurnEnded(turn=start.turn, ref=ended['uuid'], kind='prompt', state='finished')
+                    prompt_events.stage_turns(self.root, self.agent, self.launch, self.native,
+                                              (abandoned, other_turn, join, end))
+                    prompt_events.publish(self.agent, resolve_turns=True)
+
+                page = transcripts.rows(self.root, self.agent, bodies=False)
+                by_ref = {row.ref: row for row in page.rows}
+                self.assertTrue(by_ref[first['uuid']].abandoned)
+                self.assertEqual([kind for kind, _ in published],
+                                 ['turn.started', 'turn.joined', 'turn.joined', 'turn.joined', 'turn.ended'])
+                for _, result in published[1:3]:
+                    self.assertEqual((result['resolved'], result['turn'], result['ref'], result['generation']),
+                                     (False, None, None, None))
+                for edge, (_, result) in zip((join, end), published[3:], strict=True):
+                    row = by_ref[edge.ref]
+                    self.assertEqual(row.turn, 'preamble')
+                    self.assertEqual(
+                        (result['resolved'], result['turn'], result['ref'], result['generation']),
+                        (True, opened['turn'], row.cursor, page.generation) if start_resolved
+                        else (False, None, None, None),
+                    )
 
     def test_plain_append_uses_only_new_rows_but_a_new_branch_has_to_fall_back(self):
         """A late assistant row can displace the former leaf without a new user prompt."""

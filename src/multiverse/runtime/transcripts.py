@@ -779,7 +779,10 @@ def _groups(loaded):
 
 @dataclass(frozen=True, kw_only=True)
 class TurnReference:
-    """Public turn and row identity established by one immutable transcript view."""
+    """Public turn and row identity established by one immutable transcript view.
+
+    A cursor without a turn can name a row in the current history's preamble.
+    """
     turn: str | None = None
     ref: str | None = None
     generation: str | None = None
@@ -918,7 +921,7 @@ def _read_turn_references(root, directory, launch_id, native_id, generation, tra
                 row = loaded.positions.get(chosen.row_position)
                 pending_rows |= edge.ref is not None and row is None
             turn = anchors.get(anchor)
-            if row is not None and (row not in by_row or turn is not None and turn.id != by_row[row]):
+            if row is not None and by_row.get(row) != (turn.id if turn is not None else 'preamble'):
                 row = None
             ref = _cursor(loaded, row) if row is not None else None
             results.append(TurnReference(turn=turn.id if turn is not None else None, ref=ref,
