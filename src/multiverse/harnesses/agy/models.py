@@ -1,8 +1,9 @@
 """Antigravity CLI release model metadata, independent of login state, caches and live services.
 
-The table reflects the checked Antigravity CLI release's models and effort levels. Antigravity accepts both
-base IDs with `--effort` (e.g. `gemini-4-neon` + `--effort xhigh`) and effort-suffixed spellings
-(e.g. `gemini-4-neon-xhigh`), as well as unlisted free-form IDs. Nothing here spawns `agy` or reads user caches.
+The table reflects the checked Antigravity CLI release's models and effort levels. Which ones an account may run
+depends on its plan, so a launch also checks the model against `agy models` (see `account_models`). Antigravity
+accepts both base IDs with `--effort` (e.g. `gemini-4-hydrogen` + `--effort medium`) and effort-suffixed spellings
+(e.g. `gemini-4-hydrogen-medium`). Nothing here spawns `agy` or reads user caches.
 """
 from functools import lru_cache
 import json

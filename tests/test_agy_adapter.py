@@ -2595,8 +2595,9 @@ class AgyAdapterUnitTest(BaseTest):
         )
         self.assertIn('--effort=-weird', dash_cmd.argv)
         self.assertNotIn('-weird', dash_cmd.argv)
-        # 1.5.16 catalog version and additions are present.
-        self.assertEqual(catalog.version, '1.5.16')
+        # 1.5.18 catalog version, its new models, and the plan-only models kept from 1.5.16.
+        self.assertEqual(catalog.version, '1.5.18')
+        self.assertEqual((by_id['claude-sonnet-4-6'].efforts, by_id['claude-opus-4-6-thinking'].efforts), ((), ()))
         self.assertIn('gemini-4-carbon', by_id)
         self.assertIn('gemini-pro-orchestrator', by_id)
         self.assertIn('gemini-pro-orchestrator-argon', by_id)
@@ -2624,6 +2625,86 @@ class AgyAdapterUnitTest(BaseTest):
                     'usage': {'state': 'ok', 'value': {'model': measured.model, 'effort': measured.effort}},
                 }
                 self.assertEqual(display.model_label(row), expected_label)
+
+    def test_launch_refuses_a_model_the_account_does_not_list(self):
+        """Antigravity silently runs its default model for one the account can't use, spending a model nobody chose,
+        so a launch checks `agy models` first; fragile because plans differ, a wrong refusal blocks every launch, and
+        an uncached listing adds about 2 s to each launch in a batch."""
+        import multiverse.harnesses.agy as agy_module
+        listing = ('gemini-4-hydrogen-high\tGemini 4 Hydrogen (High)\ngemini-4-hydrogen-medium\tGemini 4 Hydrogen (Medium)\n'
+                   'claude-sonnet-4-6\tClaude Sonnet 4.6 (Thinking)\n')
+        listing_file = self.work / 'agy-models-listing.txt'
+        listing_file.write_text(listing)
+        fake = self.work / 'agy-models-stub'
+        calls = self.work / 'agy-models-calls.txt'
+        calls.write_text('')
+        fake.write_text(
+            f'#!{sys.executable}\nimport sys\nfrom pathlib import Path\n'
+            'if sys.argv[1:] == ["--version"]:\n    print("agy 1.5.18"); sys.exit(0)\n'
+            'if sys.argv[1:] == ["models"]:\n'
+            f'    Path({str(calls)!r}).open("a").write("models\\n")\n'
+            f'    if Path({str(self.work / "models-fail")!r}).exists(): print("gemini-4-hydrogen-high\\tpartial"); sys.exit(1)\n'
+            f'    print(Path({str(listing_file)!r}).read_text(), end=""); sys.exit(0)\n'
+        )
+        fake.chmod(0o755)
+        home = self.work / 'agy-home'
+        agy_root = home / '.gemini' / 'antigravity-cli'
+        agy_root.mkdir(parents=True)
+        (agy_root / 'installation_id').write_text('')  # agy has run here; no sign-in file, as with the keychain
+        adapter = AgyAdapter.configured('agy', {'executable': str(fake)})
+        environment = {'HOME': str(home), 'PATH': os.environ['PATH']}
+
+        def spawn(model, effort=None):
+            return adapter.spawn(LaunchContext('spawn', self._values(task='hi'), model, environment, effort=effort))
+
+        argv = spawn('gemini-4-hydrogen', 'medium').argv
+        self.assertEqual((argv[argv.index('--model') + 1], '--effort=medium' in argv), ('gemini-4-hydrogen', True))
+        spawn('gemini-4-hydrogen')
+        spawn('gemini-4-hydrogen-medium')
+        spawn('claude-sonnet-4-6')
+        for model, effort, why in (
+                ('gemini-4-neon', None, 'Antigravity on this account has no model gemini-4-neon, so it would silently '
+                                        'run its default model instead. This account lists: gemini-4-hydrogen '
+                                        '(medium, high), claude-sonnet-4-6. Pick one with --model (and --effort).'),
+                ('gemini-4-hydrogen', 'low', 'runs gemini-4-hydrogen at effort medium, high, not low'),
+                ('claude-sonnet-4-6', 'low', 'runs claude-sonnet-4-6 without an effort')):
+            with self.subTest(model=model, effort=effort):
+                with self.assertRaises(LaunchRefused) as refused:
+                    spawn(model, effort)
+                self.assertIn(why, str(refused.exception))
+        # All of those launches, in one process, listed the account once. When its plan changes, a process sees it
+        # once its listing is older than ACCOUNT_MODELS_SECONDS, and a new process at once.
+        self.assertEqual(calls.read_text().count('models'), 1)
+        listing_file.write_text(listing + 'gemini-4-neon\tGemini 4 Neon\n')
+        with self.assertRaises(LaunchRefused):
+            spawn('gemini-4-neon')
+        with patch.object(agy_module, 'ACCOUNT_MODELS_SECONDS', 0):
+            spawn('gemini-4-neon')
+        self.assertEqual(calls.read_text().count('models'), 2)
+        listing_file.write_text(listing)
+        agy_module._account_models.clear()
+        # A resume or wake can't take --model: the fix names mv2 set-model. (It asks the host HOME's agy.)
+        conv = str(uuid4())
+        saved = self._create_saved_conversation(conv)
+        (Path(saved) / 'installation_id').write_text('')
+        with self.assertRaises(LaunchRefused) as refused:
+            adapter.resume(SessionHandle('a1', 'agy', str(self.work), 'l1', conv, home=os.path.realpath(saved)),
+                           LaunchContext('resume', self._values(task='wake'), 'gemini-4-neon', environment,
+                                         resume_prompt='wake'))
+        self.assertTrue(str(refused.exception).endswith(
+            'Give it one with mv2 set-model builder --model MODEL (and --effort), then try again.'))
+        # A model from customModels, or a listing that fails (as an agy that isn't signed in does), is never refused.
+        (agy_root / 'settings.json').write_text(json.dumps({'customModels': [{'model_name': 'gemini-4-neon'}]}))
+        spawn('gemini-4-neon')
+        (agy_root / 'settings.json').unlink()
+        (self.work / 'models-fail').write_text('')
+        agy_module._account_models.clear()
+        spawn('gemini-4-neon')
+        # Where agy has never run (as in a fresh home), it isn't asked at all: listing also checks for updates.
+        (agy_root / 'installation_id').unlink()
+        before = calls.read_text().count('models')
+        spawn('gemini-4-neon')
+        self.assertEqual(calls.read_text().count('models'), before)
 
     def test_queued_prompts_and_live_pane_display(self):
         """Antigravity's Stop-hook queue feeds core's queued-prompts send guard without exposing text, failing closed

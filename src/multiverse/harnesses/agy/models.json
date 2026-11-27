@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "agy": "1.5.16",
+  "agy": "1.5.18",
   "models": [
     {
       "id": "gemini-4-neon",
@@ -181,6 +181,32 @@
       "inputs": [
         "text",
         "image"
+      ],
+      "context_window": null,
+      "default": false,
+      "hidden": false
+    },
+    {
+      "id": "claude-sonnet-4-6",
+      "name": "Claude Sonnet 4.6 (Thinking)",
+      "family": "sonnet",
+      "efforts": [],
+      "default_effort": null,
+      "inputs": [
+        "text"
+      ],
+      "context_window": null,
+      "default": false,
+      "hidden": false
+    },
+    {
+      "id": "claude-opus-4-6-thinking",
+      "name": "Claude Opus 4.6 (Thinking)",
+      "family": "opus",
+      "efforts": [],
+      "default_effort": null,
+      "inputs": [
+        "text"
       ],
       "context_window": null,
       "default": false,

@@ -19,6 +19,7 @@ normally).
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 import fnmatch
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -28,6 +29,8 @@ import shutil
 import stat
 import subprocess
 import sys
+import threading
+import time
 from uuid import uuid4
 
 from ...plugins import harness as plugin_harness
@@ -89,6 +92,99 @@ def agy_version(executable: str, *, path: str | None = None):
             return None
         _versions[key] = tuple(int(part) for part in found.groups())
     return _versions[key]
+
+
+AGY_USED_FILES = ('installation_id', 'cli.log')  # agy writes these on its first run in a home
+ACCOUNT_MODELS_SECONDS = 60.0  # how long one process reuses an account's listing
+_account_models = {}
+_account_models_lock = threading.Lock()  # the dashboard launches from several threads at once
+_EFFORT_LEVELS = ('low', 'medium', 'high', 'xhigh', 'max')
+_MODEL_ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]*')
+
+
+def account_models(executable: str, environment: Mapping[str, str], *, path: str | None = None) -> tuple[str, ...] | None:
+    """The model IDs `agy models` lists for the account the launch signs in as, or None when it can't tell.
+
+    Listing calls no model; it takes about 2 s. One that fails (an agy that isn't signed in exits 1 at once) or
+    takes over 5 s tells nothing. It runs only where agy has run before (it writes `installation_id` and
+    `cli.log` on its first run), since agy can't be signed in elsewhere and listing also checks for updates.
+    A process reuses an answer for the same agy binary, home and API key for `ACCOUNT_MODELS_SECONDS`, so a batch of
+    launches lists once, while one that runs for days (the dashboard, the plugin host) sees a changed plan.
+    """
+    env = {key: value for key, value in {**os.environ, **environment}.items() if key not in PARENT_AGY}
+    agy_root = storage.agy_home(env)
+    if not any((agy_root / name).exists() for name in AGY_USED_FILES):
+        return None
+    found = shutil.which(executable, path=path)
+    if found is None:
+        return None
+    try:
+        real = os.path.realpath(found)
+        info = os.stat(real)
+    except OSError:
+        return None
+    api_key = env.get('GEMINI_API_KEY')
+    key = (real, info.st_mtime_ns, info.st_size, os.path.realpath(agy_root),
+           hashlib.sha256(api_key.encode()).hexdigest() if api_key else None)
+    with _account_models_lock:
+        cached = _account_models.get(key)
+    if cached is not None and time.monotonic() - cached[0] < ACCOUNT_MODELS_SECONDS:
+        return cached[1]
+    ids = _list_account_models(found, env)  # outside the lock: launches for other accounts don't wait on it
+    listed_at = time.monotonic()
+    with _account_models_lock:
+        for stale in [old for old, (at, _) in _account_models.items() if listed_at - at >= ACCOUNT_MODELS_SECONDS]:
+            del _account_models[stale]
+        _account_models[key] = (listed_at, ids)
+    return ids
+
+
+def _list_account_models(found: str, env: Mapping[str, str]) -> tuple[str, ...] | None:
+    try:
+        listed = subprocess.run(
+            [found, 'models'], stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=5, env=env,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if listed.returncode != 0:
+        return None
+    ids = tuple(dict.fromkeys(
+        line.split('\t', 1)[0].strip() for line in listed.stdout.splitlines() if '\t' in line
+    ))
+    ids = tuple(model_id for model_id in ids if _MODEL_ID.fullmatch(model_id))
+    return ids or None
+
+
+def _listed_efforts(model: str, ids: Sequence[str]) -> list[str]:
+    efforts = {model_id[len(model) + 1:] for model_id in ids if model_id.startswith(f'{model}-')}
+    return [level for level in _EFFORT_LEVELS if level in efforts]
+
+
+def account_model_problem(model: str | None, effort: str | None, ids: Sequence[str]) -> str | None:
+    """Why agy, given these listed IDs, would not run `model` at `effort` but silently swap in its default."""
+    if not model:
+        return None
+    efforts = _listed_efforts(model, ids)
+    if effort:
+        if f'{model}-{effort}' in ids:
+            return None
+        if efforts:
+            return (f'Antigravity on this account runs {model} at effort {", ".join(efforts)}, not {effort}, so it '
+                    'would silently run its default model instead.')
+        if model in ids:
+            return (f'Antigravity on this account runs {model} without an effort, so with effort {effort} it would '
+                    'silently run its default model instead.')
+    elif model in ids or efforts:
+        return None
+    bases = dict.fromkeys(
+        base if level in _EFFORT_LEVELS and base else model_id
+        for model_id in ids for base, _, level in [model_id.rpartition('-')]
+    )
+    shown = ', '.join(
+        f'{base} ({", ".join(levels)})' if (levels := _listed_efforts(base, ids)) else base for base in bases
+    )
+    return (f'Antigravity on this account has no model {model}, so it would silently run its default model '
+            f'instead. This account lists: {shown}.')
 
 
 def bridge_problem(executable: str, *, path: str | None = None) -> str | None:
@@ -994,8 +1090,8 @@ def _sandbox_allow_rules(environment: Mapping[str, str] | None) -> tuple[str, ..
     return tuple(final_rules)
 
 
-def _load_personal_permissions(environment: Mapping[str, str] | None) -> dict:
-    """Read personal `permissions` from `~/.gemini/antigravity-cli/settings.json` read-only so `--settings` preserves them."""
+def _load_personal_settings(environment: Mapping[str, str] | None) -> dict:
+    """Read `~/.gemini/antigravity-cli/settings.json` read-only: `{}` when absent, `ValueError` when unreadable."""
     path = storage.agy_home(environment) / 'settings.json'
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
@@ -1022,6 +1118,13 @@ def _load_personal_permissions(environment: Mapping[str, str] | None) -> dict:
             os.close(fd)
     if not isinstance(loaded, dict):
         raise ValueError(f'Antigravity personal settings {str(path)!r} must be a JSON object')
+    return loaded
+
+
+def _load_personal_permissions(environment: Mapping[str, str] | None) -> dict:
+    """Read personal `permissions` from `~/.gemini/antigravity-cli/settings.json` read-only so `--settings` preserves them."""
+    path = storage.agy_home(environment) / 'settings.json'
+    loaded = _load_personal_settings(environment)
     raw_perms = loaded.get('permissions')
     if raw_perms is None:
         return {}
@@ -1434,6 +1537,31 @@ class AgyAdapter(ConfiguredAdapter):
             )
         return self._finalize(command, context, has_prompt=context.resume_prompt is not None)
 
+    def _account_model_problem(self, argv, context, environment, path) -> str | None:
+        """Refuse a model this account's agy doesn't list, unless `customModels` in its settings may define it."""
+        model = context.model.strip() if isinstance(context.model, str) and context.model.strip() else None
+        if model is None:
+            return None
+        ids = account_models(argv[0], environment, path=path)
+        if ids is None:
+            return None
+        problem = account_model_problem(model, getattr(context, 'effort', None) or None, ids)
+        if problem is None:
+            return None
+        if context.mode == 'resume':
+            name = context.values.get('name') or 'NAME'
+            problem += f' Give it one with mv2 set-model {name} --model MODEL (and --effort), then try again.'
+        else:
+            problem += ' Pick one with --model (and --effort).'
+        try:
+            personal = _load_personal_settings(environment)
+            _, launch_settings = _extract_user_settings(list(argv))
+        except ValueError:
+            return None
+        if 'customModels' in personal or 'customModels' in launch_settings:
+            return None
+        return problem
+
     def _finalize(self, command: CommandSpec, context, *, has_prompt: bool) -> CommandSpec:
         argv = list(command.argv)
         prompt_arg = None
@@ -1490,6 +1618,9 @@ class AgyAdapter(ConfiguredAdapter):
                         )
                 except (OSError, RuntimeError, ValueError):
                     sandbox_env.pop('MV2_RUN_DIR', None)
+        model_problem = self._account_model_problem(argv, context, sandbox_env, exe_path)
+        if model_problem is not None:
+            raise LaunchRefused(model_problem)
         home_raw = sandbox_env.get('HOME')
         home_dir = Path(home_raw).resolve() if isinstance(home_raw, str) and home_raw and os.path.isabs(home_raw) else None
         raw_workspace = context.values.get('workspace')
