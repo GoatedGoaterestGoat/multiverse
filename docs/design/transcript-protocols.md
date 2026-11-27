@@ -93,8 +93,9 @@ which confirm deliveries, read every copy and check that copies agree.
 
 ## Labels
 
-The adapter labels every row. That is all the harness knowledge turns need:
-which rows are real prompts.
+The adapter labels every row, and gives a row that names a command its
+`command` and `args`, whatever its label. That is all the harness knowledge
+turns need: which rows are real prompts.
 
 | Label | Means |
 | --- | --- |
@@ -102,7 +103,7 @@ which rows are real prompts.
 | `mid_turn` | Joins the running turn: a steer, or a prompt typed while the model works |
 | `tool_result` | A tool's result |
 | `command` | Starts a slash command; core makes it a turn of its own |
-| `command_output` | That command's echo, caveat or output, and the note a local command stores for the model under its output (`/context`'s report, `/rename`'s) |
+| `command_output` | That command's echo or output, and the note a local command stores for the model under its output (`/context`'s report, `/rename`'s) |
 | `injected` | Context the harness added: reminders, file and environment notes, a background notice merged mid-turn, a skill's instructions |
 | `compaction` | Written by a compaction: the boundary, a summary, rows it stored |
 | `response` | The model's output |
@@ -111,12 +112,23 @@ which rows are real prompts.
 Claude's rules, checked on rows written by Claude Code 2.1.286 to 2.1.310:
 
 - A `prompt` is a user row with `origin`, which only rows that start a turn
-  have. `source` is `origin.kind`. Rows from versions without `origin` fall
-  back to a new `promptId` with text or image content.
+  have, except a command's caveat and echo (below), which a command mv2 runs
+  has stamped too. `source` is `origin.kind`. Rows from versions without
+  `origin` fall back to a new `promptId` with text or image content.
 - A `mid_turn` message is a `queued_command` attachment with `commandMode`
   `prompt`. With `commandMode` `task-notification` it is `injected`.
-- A `command` is a typed slash command (a new `promptId`, no `origin`), or
-  the `<command-name>` or `system/local_command` row that starts one.
+- A `command` is a typed slash command (a new `promptId`, no `origin`), or the
+  `<command-name>` or `system/local_command` row that starts one. Where Claude
+  stores a local command as user rows, its first row is a meta caveat
+  (`<local-command-caveat>`): that row is the `command`, whatever its
+  `origin`, and the `<command-name>` row after it that belongs to it (the same
+  `promptId`, or the caveat as its parent, since Claude Code 2.1.332 stores
+  `/clear`'s caveat with no `promptId`) is its `command_output`, which still
+  names it, so a typed command and one mv2 runs are each one command turn. A
+  `<command-name>` row with no caveat before it, such as a skill's, keeps its
+  own label. A caveat a compaction stored inside its span keeps
+  `command_output`, so a `/compact`'s `<command-name>` row stays its command
+  turn's first row, the one the in-session part sees.
 - A skill's instructions are a user row with `isMeta`, `turnCompanion` and
   `sourceToolUseID`: `injected`, with `call_id` naming the tool call.
 - Claude's interruption row ("[Request interrupted by user…") is `injected`
@@ -232,6 +244,10 @@ turns.
 - A `command` row starts a command turn, which holds its `command_output`
   rows and the `compaction` rows written while it is the latest turn (so a
   typed `/compact` holds its compaction).
+- A command turn's `command`, `args` and `preview` come from its first row
+  that names a command. A caveat can start the turn before that row. When no
+  row names one, `command` and `args` are `None` and the preview is its first
+  row's.
 - Every other row joins the current prompt turn.
 - Rows before the first turn form the `preamble` turn.
 
@@ -247,7 +263,9 @@ plugin slices one history read by turn instead of reading turn by turn.
   turn-end row of its own, timed at or after its prompt. A command turn run
   meanwhile doesn't finish it. A turn-end row without a usable time leaves
   "finished" unknown.
-- A command turn is finished once its output is stored.
+- A command turn is finished once a `command_output` row is stored after the
+  last row that names its command (any `command_output` row when none names
+  one), so a command's echo alone doesn't finish it.
 - Claude's turn-end rows are `system/turn_duration` and its interruption row
   ("[Request interrupted by user…"). An interrupted turn usually writes no
   `turn_duration`.

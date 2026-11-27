@@ -150,6 +150,8 @@ def _extension(stream, header, sections, columns, tail, check):
                 or item.ref and (item.ref in added_refs or item.parent != tip)):
             return False
         if item.kind == 'user':
+            if item.mark in ('caveat', 'command-name'):
+                return False  # A local command's caveat and name rows are labelled by earlier rows: the full analysis.
             if item.origin:
                 label = 'prompt'
                 previous = label
@@ -164,7 +166,7 @@ def _extension(stream, header, sections, columns, tail, check):
         elif item.kind == 'attachment':
             label = 'mid_turn' if item.attachment == 'queued_command' and item.command_mode == 'prompt' else 'injected'
         elif item.kind == 'system/local_command':
-            label = 'command_output' if item.mark == 'output' else 'command'
+            label = 'command_output' if item.mark in ('output', 'caveat') else 'command'
         else:
             label = 'meta'
         if item.ref:

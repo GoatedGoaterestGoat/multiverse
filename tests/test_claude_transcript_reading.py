@@ -74,6 +74,12 @@ class ClaudeTranscriptReadingTest(BaseTest):
         add({'type': 'system', 'subtype': 'local_command',
              'content': '<command-name>/context</command-name>\n<command-args>SECRET-ARGS</command-args>'})
         add({'type': 'system', 'subtype': 'local_command', 'content': '<local-command-stdout>SECRET-OUTPUT</local-command-stdout>'})
+        # A local command stored as user rows (Claude 2.1.332): its echo is command_output and still names it.
+        add({'type': 'user', 'isMeta': True, 'promptId': 'p8',
+             'message': {'role': 'user', 'content': '<local-command-caveat>Caveat</local-command-caveat>'}})
+        add({'type': 'user', 'promptId': 'p8', 'message': {'role': 'user',
+             'content': '<command-name>/reload-plugins</command-name>\n<command-args>SECRET-RELOAD</command-args>'}})
+        add({'type': 'system', 'subtype': 'local_command', 'content': '<local-command-stdout>SECRET-OUTPUT</local-command-stdout>'})
         self.write(rows)
         adapter, store = self.adapter(), Path(self.session().session_file).parent / t.ROW_STORE
 
@@ -102,14 +108,17 @@ class ClaudeTranscriptReadingTest(BaseTest):
         whole = cold()
         file = saved()
         data = file.read_bytes()
-        for secret in (b'SECRET-PROMPT', b'SECRET-ANSWER', b'SECRET-ARGS', b'SECRET-OUTPUT', b'SECRET-USAGE', b'please look'):
+        for secret in (b'SECRET-PROMPT', b'SECRET-ANSWER', b'SECRET-ARGS', b'SECRET-RELOAD', b'SECRET-OUTPUT', b'SECRET-USAGE',
+                       b'please look'):
             self.assertNotIn(secret, data)  # no row text: marks, ids and positions only
         view, count = parsed_reading()
         with self.subTest('an unchanged take-over parses no row and gives the cold view'):
             self.assertEqual(count, 0)
             self.assertEqual((view.rows, view.history), (whole.rows, whole.history))
             self.assertTrue(any(fact.preview.startswith('SECRET-PROMPT') for fact in view.rows))  # read from the transcript
-            self.assertIn(('/context', 'SECRET-ARGS'), [(fact.command, fact.args) for fact in view.rows])
+            named = [(fact.command, fact.args) for fact in view.rows]
+            self.assertIn(('/context', 'SECRET-ARGS'), named)
+            self.assertIn(('/reload-plugins', 'SECRET-RELOAD'), named)  # from the echo row, read from the transcript
 
         with self.subTest('an append parses only its rows'):
             saved()
@@ -761,8 +770,9 @@ class ClaudeTranscriptReadingTest(BaseTest):
     def test_each_row_is_labelled_by_claudes_own_fields(self):
         """Labels decide what a plugin counts as a prompt or a turn's end; fragile because Claude marks them only by
         loose fields (origin, promptId, attachment types, a compaction's span, a parent link), and a wrong rule turns a
-        compaction's hundreds of stored rows into mid-turn messages, an interrupted turn into one that never ends, or a
-        local command's report into the turn before it."""
+        compaction's hundreds of stored rows into mid-turn messages, an interrupted turn into one that never ends, a
+        local command's report into the turn before it, or a local command Claude stores as user rows (Claude Code
+        2.1.332), typed or run by mv2, into prompt turns."""
         rows = [
             ('typed prompt', {'type': 'user', 'uuid': 'u1', 'promptId': 'p1', 'origin': {'kind': 'human'},
                               'message': {'role': 'user', 'content': 'Fix the bug.'}}, ('prompt', 'human')),
@@ -799,6 +809,9 @@ class ClaudeTranscriptReadingTest(BaseTest):
             ('a stored tool result', {'type': 'user', 'uuid': 's3', 'parentUuid': 's2', 'promptId': 'p2',
                                       'message': {'role': 'user', 'content': [{'type': 'tool_result', 'tool_use_id': 'c9'}]}},
              ('compaction', None)),
+            ('a caveat the compaction stored', {'type': 'user', 'uuid': 'v0', 'parentUuid': 's3', 'promptId': 'p2', 'isMeta': True,
+                                                'message': {'role': 'user', 'content': '<local-command-caveat>Caveat</local-command-caveat>'}},
+             ('command_output', None)),
             ('the stdout after it', {'type': 'user', 'uuid': 'o1', 'parentUuid': 's3', 'promptId': 'p2',
                                      'message': {'role': 'user', 'content': '<local-command-stdout>Compacted</local-command-stdout>'}},
              ('command_output', None)),
@@ -809,13 +822,49 @@ class ClaudeTranscriptReadingTest(BaseTest):
                                           'message': {'role': 'user', 'content': 'Also this.'}}, ('injected', None)),
             ('a local command', {'type': 'system', 'subtype': 'local_command', 'uuid': 'l1', 'parentUuid': None,
                                  'content': '<command-name>/context</command-name>'}, ('command', None)),
-            ('its stdout', {'type': 'system', 'subtype': 'local_command', 'uuid': 'l2', 'parentUuid': 'l1',
+            ("/context's stdout", {'type': 'system', 'subtype': 'local_command', 'uuid': 'l2', 'parentUuid': 'l1',
                             'content': '<local-command-stdout>Context usage</local-command-stdout>'}, ('command_output', None)),
             # /context's report for the model: a meta row under the command's output, so it is the command's too.
             ('its report', {'type': 'user', 'uuid': 'l3', 'parentUuid': 'l2', 'promptId': 'p4', 'isMeta': True,
                             'message': {'role': 'user', 'content': '## Context Usage'}}, ('command_output', None)),
             ('a meta row under anything else', {'type': 'user', 'uuid': 'l4', 'parentUuid': 'u3', 'promptId': 'p3', 'isMeta': True,
                                                 'message': {'role': 'user', 'content': 'A reminder'}}, ('injected', None)),
+            ('a typed local command, its caveat first', {'type': 'user', 'uuid': 'v1', 'parentUuid': 'l4', 'promptId': 'p5', 'isMeta': True,
+                                                         'message': {'role': 'user', 'content': '<local-command-caveat>Caveat</local-command-caveat>'}},
+             ('command', None)),
+            ('its name', {'type': 'user', 'uuid': 'v2', 'parentUuid': 'v1', 'promptId': 'p5',
+                          'message': {'role': 'user', 'content': '<command-name>/reload-plugins</command-name>'}}, ('command_output', None)),
+            ('its output', {'type': 'system', 'subtype': 'local_command', 'uuid': 'v3', 'parentUuid': 'v2',
+                            'content': '<local-command-stdout>Reloaded</local-command-stdout>'}, ('command_output', None)),
+            ('one mv2 ran, its caveat stamped', {'type': 'user', 'uuid': 'v4', 'parentUuid': 'v3', 'promptId': 'p6', 'isMeta': True,
+                                                 'origin': {'kind': 'plugin'},
+                                                 'message': {'role': 'user', 'content': '<local-command-caveat>Caveat</local-command-caveat>'}},
+             ('command', None)),
+            ('its stamped name', {'type': 'user', 'uuid': 'v5', 'parentUuid': 'v4', 'promptId': 'p6', 'origin': {'kind': 'plugin'},
+                                  'message': {'role': 'user', 'content': '<command-name>/reload-plugins</command-name>'}},
+             ('command_output', None)),
+            ('its output too', {'type': 'system', 'subtype': 'local_command', 'uuid': 'v6', 'parentUuid': 'v5',
+                                'content': '<local-command-stdout>Reloaded</local-command-stdout>'}, ('command_output', None)),
+            ("a skill's name, no caveat before it", {'type': 'user', 'uuid': 'v7', 'parentUuid': 'v6', 'promptId': 'p7',
+                                                     'origin': {'kind': 'human'},
+                                                     'message': {'role': 'user', 'content': '<command-name>/humanizer</command-name>'}},
+             ('prompt', 'human')),
+            # /clear's own rows in the conversation it starts (2.1.332): the caveat has no promptId and the name row
+            # another (or none), so only the link pairs them; split, the name row opened a second command turn.
+            ('a /clear, its caveat without a promptId', {'type': 'user', 'uuid': 'w1', 'parentUuid': None, 'isMeta': True,
+                                                         'message': {'role': 'user', 'content': '<local-command-caveat>Caveat</local-command-caveat>'}},
+             ('command', None)),
+            ('its name, under another promptId', {'type': 'user', 'uuid': 'w2', 'parentUuid': 'w1', 'promptId': 'p8',
+                                                  'message': {'role': 'user', 'content': '<command-name>/clear</command-name>'}},
+             ('command_output', None)),
+            ('its output, a third time', {'type': 'system', 'subtype': 'local_command', 'uuid': 'w3', 'parentUuid': 'w2',
+                                          'content': '<local-command-stdout></local-command-stdout>'}, ('command_output', None)),
+            ('another, with no promptIds at all', {'type': 'user', 'uuid': 'w4', 'parentUuid': 'w3', 'isMeta': True,
+                                                   'message': {'role': 'user', 'content': '<local-command-caveat>Caveat</local-command-caveat>'}},
+             ('command', None)),
+            ('its name, no promptId', {'type': 'user', 'uuid': 'w5', 'parentUuid': 'w4',
+                                       'message': {'role': 'user', 'content': '<command-name>/clear</command-name>'}},
+             ('command_output', None)),
             ('a title', {'type': 'ai-title', 'aiTitle': 'x'}, ('meta', None)),
         ]
         self.write([row for _, row, _ in rows])

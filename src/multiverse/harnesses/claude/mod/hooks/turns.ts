@@ -53,15 +53,38 @@ let command: { id: string; seq: number; session: string | undefined } | undefine
 let awaiting: Decision | undefined // a command's output whose next row hasn't arrived
 let task = false                   // the next person's prompt row is this launch's task
 let span = false                   // after a compaction, until its first real row: the reader's compaction span
+let naming: Caveat | undefined     // a caveat whose next row hasn't arrived yet: that row says whether it names the command
 const waiting = new Set<Owner>()   // owners whose end is being proved: a /clear wakes them
 
 const OUTPUT = ['<local-command-stdout>', '<local-command-stderr>', '<local-command-caveat>']
 const isOutput = (text: string) => OUTPUT.some((marker) => text.trimStart().startsWith(marker))
 const MARKS = [...OUTPUT, '<command-name>', '/', '[Request interrupted by user']
+const CAVEAT = '<local-command-caveat>'
+
+// A local command Claude stores as user rows (Claude Code 2.1.332's /reload-plugins, typed or run by mv2): a meta
+// caveat, the '<command-name>' row, then the system output row. The reader makes the caveat the command turn's first
+// row, so the turn starts there; its start takes its place at once and is filled once the row after it says how:
+// a '<command-name>' row names the command, and the run when mv2 ran it, once noted; any other row leaves the
+// caveat's own source. Its place is taken as the caveat arrives, or, before the session is known, as it is noted.
+type Caveat = { place?: TurnTransition; id?: string; source?: Source; attempt?: string; named?: boolean; nameDone?: boolean }
+const caveated = (row: Opener) => row.type === 'user' && row.meta === true && row.text.trimStart().startsWith(CAVEAT)
+const names = (row: Opener) => row.type === 'user' && row.text.trimStart().startsWith('<command-name>')
+
+// The command a caveat opened: a typed one (no origin stamped, or the person's or engine's) is the person's.
+const typed = (origin: { kind: string }): Source =>
+  origin.kind === 'unclassified' || origin.kind === 'composer' || origin.kind === 'engine' ? 'person' : 'harness'
+
+function fill(caveat: Caveat) {
+  if (caveat.place === undefined || caveat.place.event !== undefined || caveat.id === undefined || caveat.named === undefined) return
+  if (caveat.named && !caveat.nameDone) return
+  caveat.place.event = { type: 'started', turn: caveat.id, kind: 'command', ref: caveat.id, source: caveat.source ?? 'person',
+    ...(caveat.attempt ? { attempt: caveat.attempt } : {}), first_task: false }
+}
 
 type Opener = { type: string; door: string; origin: { kind: string }; meta?: boolean; text: string }
 
-// The reader's prompt rule (harnesses/claude/transcripts.py labels), as far as a row's append shows it: a user row
+// The reader's prompt rule (harnesses/claude/transcripts.py labels), as far as a row's append shows it (a local
+// command's caveat and name rows, which the reader makes a command turn, are taken before it): a user row
 // Claude stamped with an origin other than its engine's, the model's or a tool's opens a prompt turn; one with no
 // stamp ('unclassified', no origin in the file) only if it is neither meta nor marked as a command, its output, a
 // /compact or an interruption (a typed /reload-plugins stores such rows), and isn't in a compaction's span. The
@@ -95,6 +118,7 @@ export function compacted() {
 export function loaded(firstTask: boolean) {
   openings = []
   span = false
+  naming = undefined
   arriving.clear()
   loose = []
   unowned.clear()
@@ -139,14 +163,30 @@ export type Ending = { turn: string; kind: 'prompt' | 'command'; state: string; 
 // `session`: the conversation the row arrived in, which a late callback never trades for a newer one's; `generation`:
 // how many /clears there had been, so a row that arrived before its session id was known is judged too.
 // `opens`: an opener row, which a turn.start waits for until it is noted; `loose`: a row between turns that groups
-// with the opener before it.
+// with the opener before it; `caveat`: a local command's caveat; `nameOf`: the '<command-name>' row after one.
 export type Ticket = { seq: number; session?: string; generation?: number; owner?: Owner; place?: TurnTransition;
-  output?: Decision; reportOf?: Decision; opens?: boolean; loose?: boolean }
+  output?: Decision; reportOf?: Decision; opens?: boolean; loose?: boolean; caveat?: Caveat; nameOf?: Caveat }
 
 export function admit(row: Opener & { name?: string }, running: boolean, session: string | undefined): Ticket {
   const ticket: Ticket = { seq: ++seq, session, generation }
   const inSpan = span
-  if (opens(row, inSpan)) {
+  // The row after a caveat says whether it names the command (decided in storage order).
+  const before = naming
+  naming = undefined
+  if (before !== undefined) {
+    before.named = names(row)
+    if (before.named) ticket.nameOf = before
+    else fill(before)
+  }
+  if (caveated(row) && !inSpan) {  // a caveat a compaction stored is its output, as the reader counts it
+    const caveat: Caveat = {}
+    if (session !== undefined) {
+      caveat.place = { session }
+      turnTransitions.push(caveat.place)
+    }
+    ticket.caveat = naming = caveat
+  }
+  if (ticket.nameOf === undefined && opens(row, inSpan)) {
     ticket.opens = true
     arriving.add(ticket.seq)
   }
@@ -189,6 +229,17 @@ export function admit(row: Opener & { name?: string }, running: boolean, session
 // Says whether the queue changed, so index.ts reports what may now be ready.
 export function release(ticket: Ticket): boolean {
   let changed = false
+  // A caveat never noted opens nothing; a name row never noted leaves the caveat's own source.
+  if (ticket.caveat !== undefined && ticket.caveat.id === undefined && ticket.caveat.place?.event === undefined) {
+    if (ticket.caveat.place !== undefined) drop(ticket.caveat.place)
+    if (naming === ticket.caveat) naming = undefined
+    changed = true
+  }
+  if (ticket.nameOf !== undefined && !ticket.nameOf.nameDone) {
+    ticket.nameOf.nameDone = true
+    fill(ticket.nameOf)
+    changed = true
+  }
   if (ticket.opens === true && arriving.delete(ticket.seq)) arrival?.()
   unowned.delete(ticket.seq)
   if (ticket.place !== undefined && ticket.place.event === undefined) {
@@ -230,6 +281,11 @@ export function cleared(): { end: Ending; place: TurnTransition | undefined }[] 
   span = false
   current = undefined  // the old conversation's turn: only the hooks and rows that captured it still reach it
   openings = []  // prompt rows stored but not yet started are the old conversation's
+  if (naming !== undefined) {  // a caveat whose next row will be the new conversation's: its own source
+    naming.named = false
+    fill(naming)
+    naming = undefined
+  }
   loose = []
   unowned.clear()
   arriving.clear()  // and a new turn.start waits for none of its rows
@@ -300,6 +356,32 @@ export function stored(session: string | undefined, row: Opener & { name?: strin
   if (owner !== undefined) insert(owner.rows, { id: row.uuid, seq: ticket.seq })
   const scope = ticket.session ?? session
   const stale = ticket.generation !== undefined && ticket.generation !== generation
+  if (ticket.caveat !== undefined) {
+    const caveat = ticket.caveat
+    if (stale || ticket.seq <= commandTo || scope === undefined) {
+      if (caveat.place !== undefined) drop(caveat.place)
+      return undefined
+    }
+    commandTo = ticket.seq
+    if (caveat.place === undefined) {
+      caveat.place = { session: scope }
+      turnTransitions.push(caveat.place)
+    }
+    caveat.id = row.uuid
+    caveat.source = slash ? 'person' : typed(row.origin)
+    if (attempt) caveat.attempt = attempt
+    command = { id: row.uuid, seq: ticket.seq, session: caveat.place.session }
+    fill(caveat)
+    return undefined
+  }
+  if (ticket.nameOf !== undefined) {
+    const caveat = ticket.nameOf
+    if (slash) caveat.source = 'person'  // mv2 ran it: this row is the one that names the run
+    if (attempt) caveat.attempt = attempt
+    caveat.nameDone = true
+    fill(caveat)
+    return undefined
+  }
   if (ticket.opens === true) {
     if (stale || ticket.seq <= openedTo) return undefined
     const first = task && row.origin.kind === 'composer'

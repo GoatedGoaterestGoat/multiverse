@@ -1906,7 +1906,13 @@ output (a `/model` with none) holds no later switch; a command's end waiting for
 since none comes, and a move into the old conversation still pending is recorded first, so the
 middle conversation of two quick `/clear`s is recorded too. A `queued_command` row
 in a running turn is a join. A local command's row opens a command turn, and its
-output row ends it, or the note it stores for the model right after its output
+output row ends it; where Claude stores the command as user rows (a caveat, its
+`<command-name>` row, then its output, as Claude Code 2.1.332 does for
+`/reload-plugins`, typed or run by mv2), the caveat opens it, and its start takes its
+place at once and goes once the row after it says how: the `<command-name>` row
+names the command and, for one mv2 ran, the run, and any other row leaves the
+caveat's own source; a caveat inside a compaction's span starts nothing, as the reader
+keeps it the compaction's command output. The output row ends it, or the note it stores for the model right after its output
 (`/context`'s report), which the reader groups with it: the command's end waits for
 the next row in its conversation to say which; Claude raises no turn hooks for
 those. The source is the

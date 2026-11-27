@@ -998,9 +998,10 @@ describe('turn events', () => {
     expect(w.reports.some((r) => r.status === 'working')).toBe(true)
   })
 
-  test("a typed local command's rows, which Claude stores with no origin, never open a prompt turn", async ($, on) => {
-    // /reload-plugins stores a caveat row and a <command-name> row as user rows with no origin stamped: the reader
-    // counts them as the command and its output, so they must not become prompt turns before the next real input.
+  test("a typed local command Claude stores as user rows is a command turn from its caveat, never a prompt turn", async ($, on) => {
+    // /reload-plugins (Claude Code 2.1.332) stores a caveat row and a <command-name> row as user rows with no origin
+    // stamped, then its output: the reader makes the caveat the command and the rest its output, so they must not
+    // become prompt turns, nor a command turn with no events.
     const w = world(on)
     const user = (uuid: string, text: string, meta: boolean) =>
       row($, uuid, 'command', { kind: 'unclassified' }, { type: 'user', content: [{ type: 'text', text }], ...(meta ? { isMeta: true } : {}) })
@@ -1010,8 +1011,14 @@ describe('turn events', () => {
       content: [{ type: 'text', text: '<local-command-stdout>Reloaded</local-command-stdout>' }] })
     await prompt($, P1, { kind: 'plugin', name: 'multiverse', asUser: true })
     await $.turn.start({ text: 'go', turnId: 't1' })
-    await w.clock.settle()
-    expect(w.turns().filter((t) => t.type === 'started' || t.type === 'ended').map((t) => [t.type, t.turn])).toEqual([['started', P1]])
+    w.disk.push('c1111111-1111-4111-8111-111111111111', 'c2222222-2222-4222-8222-222222222222', 'c3333333-3333-4333-8333-333333333333')
+    await w.clock.advance(300)
+    // They are the command turn (the caveat its first row), and the output ends it; the prompt is the only prompt turn.
+    expect(w.turns().filter((t) => t.type === 'started' || t.type === 'ended').map((t) => [t.type, t.kind, t.turn, t.ref])).toEqual([
+      ['started', 'command', 'c1111111-1111-4111-8111-111111111111', 'c1111111-1111-4111-8111-111111111111'],
+      ['ended', 'command', 'c1111111-1111-4111-8111-111111111111', 'c3333333-3333-4333-8333-333333333333'],
+      ['started', 'prompt', P1, P1]])
+    expect(w.turns()[0]?.source).toBe('person')
   })
 
   test("a row Claude stores with a queued prompt before the next one is that turn's last row, even one still being stored", async ($, on) => {
@@ -1401,6 +1408,71 @@ describe('turn events', () => {
     expect(reported('s1', P1)).toBeLessThan(first ?? -1)
     expect(reported('s2', P2)).toBeGreaterThanOrEqual(first ?? Infinity)
     expect(reported('s2', P2)).toBeLessThan(second ?? -1)
+  })
+
+  test("a local command mv2 ran, stored as stamped user rows, is one command turn named by its run", async ($, on) => {
+    // mv2 slash's run of such a command stores the same rows stamped with the multiverse plugin's origin. Its caveat
+    // opens the command turn, but only the '<command-name>' row after it names the run, so the start waits for that
+    // row, even one still being stored, and core can join the turn to mv2's slash record.
+    const w = world(on)
+    const C1 = 'c1111111-1111-4111-8111-111111111111'
+    const C2 = 'c2222222-2222-4222-8222-222222222222'
+    const C3 = 'c3333333-3333-4333-8333-333333333333'
+    const ours = { kind: 'plugin', name: 'multiverse' }
+    await answer($, R1)
+    await $.session.receive({ origin: { kind: 'peer' }, text: `<<MV2 command id=${RUN}>>${JSON.stringify({ command: 'context', args: '' })}<</MV2>>` })
+    await w.clock.settle()
+    // Both rows still being stored, the caveat noted first: its start waits for the row that names the run.
+    const heldCaveat = w.hold(C1)
+    const opening = row($, C1, 'command', ours, { type: 'user', isMeta: true, content: [{ type: 'text', text: '<local-command-caveat>Caveat</local-command-caveat>' }] })
+    await heldCaveat.reached
+    const held = w.hold(C2)
+    const naming = row($, C2, 'command', ours, { type: 'user', content: [{ type: 'text', text: '<command-name>/context</command-name>' }] })
+    await held.reached
+    heldCaveat.release()
+    await opening
+    await w.clock.settle()
+    expect(w.turns()).toEqual([])
+    held.release()
+    await naming
+    await row($, C3, 'command', { kind: 'engine' }, { type: 'system', name: 'local_command', content: [{ type: 'text', text: '<local-command-stdout>Context</local-command-stdout>' }] })
+    w.disk.push(C1, C2, C3)
+    for (let i = 0; i < 25; i++) await w.clock.advance(100)  // its end waits, up to its bound, for the row after the output
+    expect(w.turns()).toEqual([
+      { type: 'started', turn: C1, kind: 'command', ref: C1, source: 'person', attempt: RUN, first_task: false },
+      { type: 'ended', turn: C1, kind: 'command', ref: C3, state: 'finished' }])
+  })
+
+  test("a caveat with no '<command-name>' row after it starts its command turn with its own source", async ($, on) => {
+    // Its start takes its place at once: a caveat the next row doesn't name must not hold everything behind it.
+    const w = world(on)
+    const C1 = 'c1111111-1111-4111-8111-111111111111'
+    await row($, C1, 'command', { kind: 'unclassified' }, { type: 'user', isMeta: true, content: [{ type: 'text', text: '<local-command-caveat>Caveat</local-command-caveat>' }] })
+    await prompt($, P1)
+    await $.turn.start({ text: 'go', turnId: 't1' })
+    await w.clock.settle()
+    expect(w.turns().map((t) => [t.type, t.kind, t.turn, t.source])).toEqual([['started', 'command', C1, 'person'], ['started', 'prompt', P1, 'person']])
+  })
+
+
+  test("a caveat a compaction stored inside its span starts no command turn", async ($, on) => {
+    // The reader keeps such a caveat as the compaction's command_output, so the /compact's '<command-name>' row stays
+    // its command turn's first row; a command turn started at the caveat would name a turn the reader doesn't have.
+    const w = world(on)
+    const C1 = 'c1111111-1111-4111-8111-111111111111'
+    const C2 = 'c2222222-2222-4222-8222-222222222222'
+    const caveat = (uuid: string) => row($, uuid, 'command', { kind: 'unclassified' }, { type: 'user', isMeta: true,
+      content: [{ type: 'text', text: '<local-command-caveat>Caveat</local-command-caveat>' }] })
+    await answer($, R1)
+    await $.session.compact({ trigger: 'manual', messages: [] } as never)
+    await caveat(C1)
+    await prompt($, P1)  // a real row: the span ends
+    await $.turn.start({ text: 'go', turnId: 't1' })
+    await caveat(C2)  // outside a span: a local command
+    await row($, 'c3333333-3333-4333-8333-333333333333', 'command', { kind: 'unclassified' }, { type: 'user',
+      content: [{ type: 'text', text: '<command-name>/reload-plugins</command-name>' }] })
+    await w.clock.settle()
+    expect(w.turns().filter((t) => t.type === 'started').map((t) => [t.kind, t.turn])).toEqual([['prompt', P1], ['command', C2]])
   })
 
   test("an end a /clear overtakes is still proved in its own conversation's file", async ($, on) => {

@@ -95,6 +95,112 @@ class ClaudeTurnProjectionTest(BaseTest):
         self.assertTrue(next(row for row in page.rows if row.ref == after['uuid']).abandoned)
         self.assertIsNone(self.adapter.turn_cursor_projection(self.session, (old,)))
 
+    def test_an_appended_local_command_opened_by_its_caveat_is_never_claimed_from_new_rows_alone(self):
+        """A caveat and its '<command-name>' row are labelled by the rows before them: read from appended rows alone,
+        the stamped rows of a command mv2 ran would count as prompt turns, and a plugin from before the caveat opened
+        command turns, reporting the name row as a prompt's start, would have it resolved to a turn the history doesn't
+        have."""
+        fixture = ClaudeRows()
+        fixture.prompt('First')
+        fixture.response('First response')
+        fixture.turn_end()
+        self.append(*fixture.rows)
+        self.adapter.transcript_view(self.session)  # the saved index: the rows below are an append
+        start = len(fixture.rows)
+        fixture._prompt = str(uuid4())
+        ours = {'kind': 'plugin', 'name': 'multiverse'}
+        caveat = fixture.add('user', isMeta=True, origin=ours,
+                             message={'role': 'user', 'content': '<local-command-caveat>Caveat</local-command-caveat>'})
+        name = fixture.add('user', origin=ours, message={'role': 'user', 'content': '<command-name>/reload-plugins</command-name>'})
+        output = fixture.add('system', subtype='local_command', content='<local-command-stdout>Reloaded</local-command-stdout>')
+        after = fixture.prompt('Second')
+        self.append(*fixture.rows[start:])
+        edges = (TurnStarted(turn=caveat['uuid'], ref=caveat['uuid'], source='person', kind='command'),
+                 TurnEnded(turn=caveat['uuid'], ref=output['uuid'], kind='command', state='finished'),
+                 TurnStarted(turn=after['uuid'], ref=after['uuid'], source='person', kind='prompt'))
+        page = transcripts.rows(self.root, self.agent, bodies=False)
+        by_ref = {row.ref: row for row in page.rows}
+        turns = {turn.id: turn for turn in transcripts.turns(self.root, self.agent).turns}
+        self.assertEqual(turns[by_ref[caveat['uuid']].turn].kind, 'command')
+        # First, while the saved index still ends before these rows (a full read since may save a newer one).
+        claude._transcripts.clear()
+        old = TurnStarted(turn=name['uuid'], ref=name['uuid'], source='harness', kind='prompt')
+        resolved, = transcripts.turn_references(self.root, self.agent, self.launch, self.native, 0, (old,),
+                                                storage=self.session, deadline=time.monotonic() + 5)
+        self.assertIn(resolved.turn, (None, *turns))  # never a turn the public history doesn't have
+        for batch in (edges, edges[2:]):  # the next prompt alone too: nothing else in the batch to refuse
+            claude._transcripts.clear()  # what a new process starts from: the saved index and the appended rows
+            actual = transcripts.turn_references(self.root, self.agent, self.launch, self.native, 0, batch,
+                                                 storage=self.session, deadline=time.monotonic() + 5)
+            for edge, item in zip(batch, actual, strict=True):
+                row = by_ref[edge.ref]
+                turn = turns[row.turn]
+                self.assertEqual(item, transcripts.TurnReference(turn=turn.id, ref=row.cursor,
+                                                               generation=page.generation, kind=turn.kind))
+
+    def test_a_command_turn_opened_by_a_caveat_is_named_by_its_echo_and_finished_only_at_its_output(self):
+        """The caveat names no command and the echo after it is command_output: counted finished at the echo, GOAT
+        would build a /multiverse inbox run before its output, with no leaves, and the turn would name no command.
+        Claude's older layout names the command twice, the typed row and its echo: it too is finished only after both."""
+        for case, origin in (('typed', None), ('run by mv2', {'kind': 'plugin', 'name': 'multiverse'})):
+            with self.subTest(case):
+                self.path.unlink(missing_ok=True)
+                claude._transcripts.clear()
+                fixture = ClaudeRows()
+                fixture.prompt('First')
+                fixture.response('First response')
+                fixture.turn_end()
+                fixture._prompt = str(uuid4())
+                stamp = {'origin': origin} if origin else {}
+                caveat = fixture.add('user', isMeta=True, **stamp,
+                                     message={'role': 'user', 'content': '<local-command-caveat>Caveat</local-command-caveat>'})
+                naming_text = '<command-name>/multiverse</command-name>\n<command-args>inbox</command-args>'
+                fixture.add('user', **stamp, message={'role': 'user', 'content': naming_text})
+                self.append(*fixture.rows)
+                turn = next(turn for turn in transcripts.turns(self.root, self.agent).turns if turn.id == caveat['uuid'])
+                self.assertEqual((turn.kind, turn.command, turn.args, turn.finished), ('command', '/multiverse', 'inbox', False))
+                self.assertEqual(turn.preview, naming_text)
+                self.append(fixture.add('system', subtype='local_command', content='<local-command-stdout>Inbox</local-command-stdout>'))
+                turn = next(turn for turn in transcripts.turns(self.root, self.agent).turns if turn.id == caveat['uuid'])
+                self.assertTrue(turn.finished)
+        with self.subTest('the older layout: a typed command row, then its echo'):
+            self.path.unlink(missing_ok=True)
+            claude._transcripts.clear()
+            fixture = ClaudeRows()
+            fixture.prompt('First')
+            fixture.response('First response')
+            fixture.turn_end()
+            fixture._prompt = str(uuid4())
+            typed = fixture.add('user', message={'role': 'user', 'content': '/compact keep the plan'})
+            fixture.add('user', message={'role': 'user', 'content': '<command-name>/compact</command-name>\n<command-args>keep the plan</command-args>'})
+            self.append(*fixture.rows)
+            turn = next(turn for turn in transcripts.turns(self.root, self.agent).turns if turn.id == typed['uuid'])
+            self.assertEqual((turn.kind, turn.command, turn.args, turn.finished), ('command', '/compact', 'keep the plan', False))
+            self.append(fixture.add('user', message={'role': 'user', 'content': '<local-command-stdout>Compacted</local-command-stdout>'}))
+            turn = next(turn for turn in transcripts.turns(self.root, self.agent).turns if turn.id == typed['uuid'])
+            self.assertTrue(turn.finished)
+
+    def test_appended_system_caveat_keeps_the_system_command_opening(self):
+        """The new user caveat label must not promote legacy system command output to an opener."""
+        fixture = ClaudeRows()
+        fixture.prompt('Initial input')
+        command = fixture.add('system', subtype='local_command', content='<command-name>/context</command-name>')
+        self.append(*fixture.rows)
+        self.adapter.transcript_view(self.session)
+        caveat = fixture.add('system', subtype='local_command',
+                             content='<local-command-caveat>Notice</local-command-caveat>')
+        self.append(caveat)
+        edge = TurnEnded(turn=command['uuid'], ref=caveat['uuid'], kind='command', state='finished')
+        page = transcripts.rows(self.root, self.agent, bodies=False)
+        row = next(row for row in page.rows if row.ref == caveat['uuid'])
+        with self.subTest(reader='public history'):
+            self.assertEqual(row.turn, command['uuid'])
+        with self.subTest(reader='indexed append'):
+            proof = self.adapter.turn_cursor_projection(self.session, (edge,))
+            self.assertIsNotNone(proof)
+            self.assertEqual(proof[0].row_nearest, caveat['uuid'])
+            self.assertEqual(proof[0].turn_nearest, command['uuid'])
+
     def test_worker_builds_missing_index_before_requesting_a_full_view(self):
         """Preparing a missing index must use the worker's deadline and stay off the status path."""
         fixture = ClaudeRows()
