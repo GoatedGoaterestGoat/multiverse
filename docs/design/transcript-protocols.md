@@ -543,6 +543,7 @@ CLAUDE -p --resume RUN_ID --no-session-persistence --tools ''
   but reads no OAuth login. The model gets no tools. A real 2.1.312 run read no
   CLAUDE.md from its own folder even without the switch, which stays for the
   user's `~/.claude/CLAUDE.md`.
+- **Cleanup.** The supervisor creates and records a private `.claude/` in the run's working directory. Once the run's process group has stopped, it removes that directory and its contents after checking its recorded identity. The session file in the selected Claude store is tracked separately.
 - **Rows** (passthrough) get the run's session ID, folder and a linear parent
   chain; `isSidechain`, `logicalParentUuid` and `agentId` are dropped, and
   recorded usage is cleared, since Claude sizes a resumed session from the last

@@ -1935,6 +1935,7 @@ class ClaudeAdapter(ConfiguredAdapter):
         return RunPlan(command=CommandSpec(tuple(argv), one_shot.UNSET, environment=dict(extra)),
                        files=(RunFile(path=f'projects/{key}/{run.id}.jsonl', content=content, root='store'),) if rows
                        else (),
+                       disposable=('.claude',),  # Claude can write state in its private working directory.
                        interpret=interpret)
 
     def transcript_readable(self, session, *, reader=None):
