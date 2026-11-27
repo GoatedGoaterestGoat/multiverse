@@ -290,7 +290,9 @@ rows through this protocol, with `transcripts.read`.
   a skill a harness stores as a prompt is a `prompt` turn. `ref` and
   `generation` are the row's cursor: the input's row for a start or join, the
   turn's last stored row for an end, its own turn-end row included where the
-  harness has stored one. `resolved` is true when mv2 proved all three; false
+  harness has stored one, or the last row the harness's in-session part saw
+  where it can't see that one (a compaction writes a `/compact`'s output
+  straight to the file). `resolved` is true when mv2 proved all three; false
   when it couldn't, and then they are null. An unresolved event is published
   anyway, in its place, never dropped; a plugin pairs a null-turn start and
   end by order, since a conversation runs one turn at a time.

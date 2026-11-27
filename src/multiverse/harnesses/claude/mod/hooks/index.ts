@@ -12,7 +12,8 @@ import { type DiskRecord, type Ending, type Ticket, type TurnTransition, abandon
   active as turnActive, ended as turnEnded, ending as turnEnding, latest as turnLatest, loaded as turnsLoaded, proving as turnProving,
   release as turnRelease, reserve as turnPlace, started as turnStarted, stepped as turnStepped, limit as turnLimit,
   storing as turnStoring, stored as turnRow, arrived as turnArrived, onArrival as turnOnArrival, lastRow as turnLastRow,
-  compacted as turnsCompacted, edgesFor as turnEdgesFor, turnTransitions } from './turns'
+  compacted as turnsCompacted, edgesFor as turnEdgesFor, compactEnded as turnCompactEnded, storedUnder as turnStoredUnder,
+  turnTransitions } from './turns'
 import { publishQueue, reloaded } from './queue'
 import { leaving as turnLeaving, openCommand as turnOpenCommand } from './turns'
 import type { QueueView } from './queue'
@@ -331,6 +332,7 @@ async function finishTurn($: EngineInterface, end: Ending, downstream?: Promise<
     done = true
     turnProving(owner, false)
     turnAbandon(end)  // a join of its step still being stored gives up its place
+    turnStoredUnder(end, undefined)  // a failed /compact's start goes before its end, whatever the file showed
     // With no row proved, an end whose conversation has moved on names its last noted row, the best proof left.
     turnEnded(place, end, ref ?? (end.unread === true || sessionId !== end.session ? turnLastRow(owner) : null))
     void report($)
@@ -350,6 +352,7 @@ async function finishTurn($: EngineInterface, end: Ending, downstream?: Promise<
       if (end.session !== undefined || sessionId === end.session) {
         const disk = await rowsOnDisk($, path, Math.min(TURN_ROWS_READ_MS, left))
         if (done) break
+        turnStoredUnder(end, disk)
         const found = turnLatest(owner, disk, turnLimit(end))
         ref = found.ref ?? ref
         if (found.complete && !turnStoring(end) && released) break
@@ -1249,10 +1252,25 @@ export const register: Register = (on) => {
     }
   })
 
-  // A compaction's own rows, until its first real one, open no turn: the reader counts them as the compaction's.
+  // A compaction's own rows, until its first real one, open no turn: the reader counts them as the compaction's. A
+  // /compact's command turn ends when its compaction returns.
   on("session.compact", async ($, e, next) => {
-    if (e.agentId === undefined) turnsCompacted()
-    return next(e)
+    if (e.agentId !== undefined) return next(e)
+    let state = "finished"
+    try {
+      const result = await next(e)
+      // Only a compaction that happened stored a span (from its boundary): one with nothing to compact, or that
+      // failed, stores its rows as a local command's, and the next command's caveat must open its turn.
+      turnsCompacted()
+      return result
+    } catch (error) {
+      // Esc during the compaction aborts its request ("API Error: Request was aborted."); anything else failed it.
+      state = /aborted/i.test(String(error)) ? "interrupted" : "error"
+      throw error
+    } finally {
+      const end = e.trigger === "manual" ? turnCompactEnded(state) : undefined
+      if (end !== undefined) void finishTurn($, end)
+    }
   })
 
   on("session.append", async ($, e, next) => {

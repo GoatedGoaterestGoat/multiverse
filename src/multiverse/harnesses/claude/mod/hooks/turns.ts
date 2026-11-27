@@ -37,7 +37,7 @@ type Decision = { session: string | undefined; decided: boolean; report: boolean
 // order of its rows still being stored.
 export type Owner = { id: string; kind: 'prompt' | 'command'; rows: Row[]; session: string | undefined; pending: number;
   places: Map<TurnTransition, number>; decision?: Decision; output?: string; wake?: () => void; steps?: number[];
-  inflight?: Set<number> }
+  inflight?: Set<number>; last?: string }
 
 let seq = 0
 let generation = 0                 // /clears so far: a row from before the latest is stale, known session id or not
@@ -54,6 +54,7 @@ let awaiting: Decision | undefined // a command's output whose next row hasn't a
 let task = false                   // the next person's prompt row is this launch's task
 let span = false                   // after a compaction, until its first real row: the reader's compaction span
 let naming: Caveat | undefined     // a caveat whose next row hasn't arrived yet: that row says whether it names the command
+let compacting: Compact | undefined  // a /compact's command turn, until its compaction returns
 const waiting = new Set<Owner>()   // owners whose end is being proved: a /clear wakes them
 
 const OUTPUT = ['<local-command-stdout>', '<local-command-stderr>', '<local-command-caveat>']
@@ -69,6 +70,24 @@ const CAVEAT = '<local-command-caveat>'
 type Caveat = { place?: TurnTransition; id?: string; source?: Source; attempt?: string; named?: boolean; nameDone?: boolean }
 const caveated = (row: Opener) => row.type === 'user' && row.meta === true && row.text.trimStart().startsWith(CAVEAT)
 const names = (row: Opener) => row.type === 'user' && row.text.trimStart().startsWith('<command-name>')
+
+// A /compact's own row (Claude Code 2.1.332): typed, a note from Claude's engine; run by mv2, a prompt the plugin
+// submitted. The reader makes it the first row of its command turn (the file holds it rewritten as a
+// '<command-name>' row with the same id), and no row after it reaches the mod, so the turn starts at it and ends
+// when its compaction returns (compactEnded). Claude writes that row to the file only after the compaction, so its
+// start keeps its place until then, for core to find the row. A compaction that fails or is cancelled ends it as
+// it went; one that never comes (Claude's "No messages to compact" raises no session.compact) lets its start go at
+// the next command, turn.start or /clear, and leaves its end to core. Its start can then be unresolved: Claude
+// files such a /compact under a caveat the mod never sees, or not at all.
+type Compact = { place?: TurnTransition; owner?: Owner; start?: Record<string, unknown>; gone?: boolean }
+const go = (compact: Compact | undefined) => {
+  if (compact === undefined) return
+  compact.gone = true  // noted later, its start goes at once
+  if (compact.place !== undefined && compact.place.event === undefined && compact.start !== undefined) compact.place.event = compact.start
+}
+const compacts = (row: Opener) => row.type === 'user' && /^\/compact(\s|$)/.test(row.text.trimStart())
+  && (row.door === 'note' || row.door === 'prompt' || row.door === 'command')
+  && row.origin.kind !== 'model' && row.origin.kind !== 'tool'
 
 // The command a caveat opened: a typed one (no origin stamped, or the person's or engine's) is the person's.
 const typed = (origin: { kind: string }): Source =>
@@ -104,10 +123,11 @@ function opens(row: Opener, inSpan = false): boolean {
 // The reader's end of a compaction's span: a stamped user row, a reply or a tool result.
 const real = (row: Opener) => (row.type === 'user' && stamped(row)) || row.door === 'response' || row.door === 'tool-result'
 
-// A row noted between turns that the reader groups with the prompt row before it: neither an opener nor a local
-// command's row, output or report.
+// A row noted between turns that the reader groups with the prompt row before it: neither an opener nor a command's
+// own row (a /compact, a caveat, a '<command-name>' row, on any door), output or report, which the reader puts in a
+// command turn of its own.
 const groups = (row: Opener & { name?: string }, inSpan: boolean) => !opens(row, inSpan) && row.door !== 'command'
-  && !(row.type === 'system' && row.name === 'local_command')
+  && !(row.type === 'system' && row.name === 'local_command') && !compacts(row) && !caveated(row) && !names(row)
 
 // A compaction began (session.compact): until its first real row, an unstamped row opens nothing.
 export function compacted() {
@@ -119,6 +139,7 @@ export function loaded(firstTask: boolean) {
   openings = []
   span = false
   naming = undefined
+  compacting = undefined
   arriving.clear()
   loose = []
   unowned.clear()
@@ -154,7 +175,7 @@ function source(origin: { kind: string }): Source {
 // moved the session on while the end waited (core then drops it and closes the old turn at the switch).
 // `unread`: its conversation's file is no longer read (a /clear moved on): the end names its last noted row instead.
 export type Ending = { turn: string; kind: 'prompt' | 'command'; state: string; session: string | undefined; owner: Owner;
-  step?: number; unread?: boolean }
+  step?: number; unread?: boolean; compact?: Compact }
 
 // What a row arriving (session.append entered, main conversation only) is: its place in storage order; its owner,
 // held pending until the row is noted, so it lands there even if another turn has started (or a /clear moved on) by
@@ -165,11 +186,12 @@ export type Ending = { turn: string; kind: 'prompt' | 'command'; state: string; 
 // `opens`: an opener row, which a turn.start waits for until it is noted; `loose`: a row between turns that groups
 // with the opener before it; `caveat`: a local command's caveat; `nameOf`: the '<command-name>' row after one.
 export type Ticket = { seq: number; session?: string; generation?: number; owner?: Owner; place?: TurnTransition;
-  output?: Decision; reportOf?: Decision; opens?: boolean; loose?: boolean; caveat?: Caveat; nameOf?: Caveat }
+  output?: Decision; reportOf?: Decision; opens?: boolean; loose?: boolean; caveat?: Caveat; nameOf?: Caveat;
+  compact?: Compact }
 
 export function admit(row: Opener & { name?: string }, running: boolean, session: string | undefined): Ticket {
   const ticket: Ticket = { seq: ++seq, session, generation }
-  const inSpan = span
+  const inSpan = span && !real(row)  // a real row ends the span before it is counted, as the reader reads it
   // The row after a caveat says whether it names the command (decided in storage order).
   const before = naming
   naming = undefined
@@ -186,6 +208,20 @@ export function admit(row: Opener & { name?: string }, running: boolean, session
     }
     ticket.caveat = naming = caveat
   }
+  // A new command means a /compact before it isn't compacting any more: its start goes first.
+  const starts = compacts(row) || (caveated(row) && !inSpan) || (row.type === 'system' && row.name === 'local_command' && !isOutput(row.text))
+  if (starts && compacting !== undefined) {
+    go(compacting)
+    compacting = undefined
+  }
+  if (compacts(row)) {
+    const compact: Compact = {}
+    if (session !== undefined) {
+      compact.place = { session }
+      turnTransitions.push(compact.place)
+    }
+    ticket.compact = compacting = compact
+  }
   if (ticket.nameOf === undefined && opens(row, inSpan)) {
     ticket.opens = true
     arriving.add(ticket.seq)
@@ -195,7 +231,9 @@ export function admit(row: Opener & { name?: string }, running: boolean, session
   awaiting = undefined
   if (decision !== undefined) {
     decision.decided = true
-    decision.report = row.door === 'note' && row.type === 'user' && decision.session !== undefined && decision.session === session
+    // A report is a meta note, as the reader counts it: a /compact typed right after is a note too, but not meta.
+    decision.report = row.door === 'note' && row.type === 'user' && row.meta === true && decision.session !== undefined
+      && decision.session === session
     if (decision.report) {
       decision.pending += 1
       ticket.reportOf = decision
@@ -229,7 +267,12 @@ export function admit(row: Opener & { name?: string }, running: boolean, session
 // Says whether the queue changed, so index.ts reports what may now be ready.
 export function release(ticket: Ticket): boolean {
   let changed = false
-  // A caveat never noted opens nothing; a name row never noted leaves the caveat's own source.
+  // A /compact or a caveat never noted opens nothing; a name row never noted leaves the caveat's own source.
+  if (ticket.compact !== undefined && ticket.compact.owner === undefined && ticket.compact.start === undefined) {
+    if (ticket.compact.place !== undefined) drop(ticket.compact.place)
+    if (compacting === ticket.compact) compacting = undefined
+    changed = true
+  }
   if (ticket.caveat !== undefined && ticket.caveat.id === undefined && ticket.caveat.place?.event === undefined) {
     if (ticket.caveat.place !== undefined) drop(ticket.caveat.place)
     if (naming === ticket.caveat) naming = undefined
@@ -281,6 +324,8 @@ export function cleared(): { end: Ending; place: TurnTransition | undefined }[] 
   span = false
   current = undefined  // the old conversation's turn: only the hooks and rows that captured it still reach it
   openings = []  // prompt rows stored but not yet started are the old conversation's
+  go(compacting)
+  compacting = undefined
   if (naming !== undefined) {  // a caveat whose next row will be the new conversation's: its own source
     naming.named = false
     fill(naming)
@@ -356,6 +401,25 @@ export function stored(session: string | undefined, row: Opener & { name?: strin
   if (owner !== undefined) insert(owner.rows, { id: row.uuid, seq: ticket.seq })
   const scope = ticket.session ?? session
   const stale = ticket.generation !== undefined && ticket.generation !== generation
+  if (ticket.compact !== undefined) {
+    const compact = ticket.compact
+    if (stale || scope === undefined) {
+      if (compact.place !== undefined) drop(compact.place)
+      if (compacting === compact) compacting = undefined
+      return undefined
+    }
+    if (compact.place === undefined) {
+      compact.place = { session: scope }
+      turnTransitions.push(compact.place)
+    }
+    compact.start = { type: 'started', turn: row.uuid, kind: 'command', ref: row.uuid,
+      source: slash ? 'person' : typed(row.origin), ...(attempt ? { attempt } : {}), first_task: false }
+    // Its own row is the last of its rows the mod sees: its end names it, once that row is in the file.
+    compact.owner = { id: row.uuid, kind: 'command', rows: [{ id: row.uuid, seq: ticket.seq }], session: compact.place.session,
+      pending: 0, places: new Map(), output: row.uuid }
+    if (compact.gone) compact.place.event = compact.start  // let go while its row was being stored
+    return undefined
+  }
   if (ticket.caveat !== undefined) {
     const caveat = ticket.caveat
     if (stale || ticket.seq <= commandTo || scope === undefined) {
@@ -424,6 +488,39 @@ export function stored(session: string | undefined, row: Opener & { name?: strin
   return undefined
 }
 
+// A manual compaction returned, or failed (`state`): the /compact it ran for starts and ends, at its own row.
+export function compactEnded(state = 'finished'): Ending | undefined {
+  const compact = compacting
+  compacting = undefined
+  // A compaction that happened leaves the /compact's row its turn's first, in the span; one that failed (nothing to
+  // compact, an error, Esc) is stored under a caveat the mod never sees, so its start waits for the file (storedUnder).
+  if (state === 'finished' || compact?.owner === undefined) go(compact)  // its row is in the file now, if it ever will be
+  if (compact?.owner === undefined) return undefined
+  return { turn: compact.owner.id, kind: 'command', state, session: compact.owner.session, owner: compact.owner,
+    ...(state === 'finished' ? {} : { compact }) }
+}
+
+// A failed /compact, from the file: Claude stored its row under its caveat (the row's parent, a meta user row), which
+// opens its command turn, so its start and end name the caveat, and its end the output under the row. The start goes
+// once the row is there, or when the end goes without (`disk` undefined).
+export function storedUnder(end: Ending, disk: DiskRecord[] | undefined) {
+  const compact = end.compact
+  if (compact === undefined || compact.gone || compact.start === undefined) return
+  const mine = compact.start.ref
+  if (disk !== undefined) {
+    const own = disk.find((record) => record.uuid === mine)
+    if (own === undefined) return  // not in the file yet
+    const caveat = disk.find((record) => record.uuid === own.parent && record.type === 'user' && record.meta === true)
+    if (caveat !== undefined) {
+      compact.start = { ...compact.start, turn: caveat.uuid, ref: caveat.uuid }
+      end.turn = end.owner.id = caveat.uuid
+      const output = disk.find((record) => record.parent === mine)
+      if (output !== undefined) end.owner.output = end.owner.last = output.uuid
+    }
+  }
+  go(compact)
+}
+
 // Whether every opener row admitted up to `boundary` has been noted (or never will be).
 export function arrived(boundary: number): boolean {
   for (const at of arriving) if (at <= boundary) return false
@@ -442,6 +539,8 @@ export function onArrival(wake: (() => void) | undefined) {
 // one Claude continues the last turn. An opener noted only after its turn.start is never one: a later start would
 // put it out of order. Returns the earlier turns' ends, each with its place taken, for index.ts to prove.
 export function started(session: string | undefined, boundary: number): { end: Ending; place: TurnTransition | undefined }[] {
+  go(compacting)  // a /compact whose compaction never came: its start goes, and the next start records its end
+  compacting = undefined
   const taken = openings.filter((opening) => opening.seq <= boundary)
   openings = openings.filter((opening) => opening.seq > boundary)
   openedTo = Math.max(openedTo, boundary)
@@ -576,6 +675,7 @@ export function latest(owner: Owner, disk: DiskRecord[], upTo = Infinity): { ref
   }
   const rows = owner.rows.filter((row) => row.seq <= upTo)
   for (const row of rows) consider(row.id)
+  if (owner.last !== undefined) consider(owner.last)
   if (owner.kind === 'command') {
     const decision = owner.decision
     const noted = decision?.note !== undefined && at.has(decision.note) ? decision.note : undefined

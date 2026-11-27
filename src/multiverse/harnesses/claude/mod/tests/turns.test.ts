@@ -33,7 +33,9 @@ function world(on: On, env: Record<string, string> = {}, slow = false, heldInfo 
     if (['clear', 'resume', 'fork'].includes(start.source ?? '') && processFile.follows) processFile.id = start.session_id
     return {}
   })
-  on('session.compact', async () => ({ skip: 'test' }) as never)
+  // Claude's own compaction: `compactError.message`, when set, makes it fail with that error.
+  const compactError: { message?: string } = {}
+  on('session.compact', async () => { if (compactError.message !== undefined) throw new Error(compactError.message); return { skip: 'test' } as never })
   // A row's append the test holds after the row is stored (on disk, its callback not yet returned): hold(uuid).
   const holds = new Map<string, { entered: () => void; until: Promise<void> }>()
   on('session.append', async ($, e, next) => {
@@ -58,7 +60,8 @@ function world(on: On, env: Record<string, string> = {}, slow = false, heldInfo 
     return { value: { ...info } } as never
   })
   // The commands Claude lists and runs, for a command mv2 asks the mod to run.
-  on('command.list', async () => ({ value: [{ name: 'context', description: 'Context usage', source: 'builtin' }] }) as never)
+  on('command.list', async () => ({ value: [{ name: 'context', description: 'Context usage', source: 'builtin' },
+    { name: 'compact', description: 'Compact the conversation', source: 'builtin' }] }) as never)
   on('command.run', async () => ({ text: '' }) as never)
   on('session.messages', async () => ({ value: [] }) as never)
   on('session.model', async () => ({ value: 'claude-haiku-5-5' }) as never)
@@ -111,7 +114,8 @@ function world(on: On, env: Record<string, string> = {}, slow = false, heldInfo 
     holds.set(uuid, { entered: () => entered(), until: new Promise<void>((resolve) => { release = resolve }) })
     return { reached, release: () => release() }
   }
-  return { clock, disk, files, paths, after, reports, reads, turns, release, hold, idHeld, heldHooks, info, processFile, moves, hanging }
+  return { clock, disk, files, paths, after, reports, reads, turns, release, hold, idHeld, heldHooks, info, processFile, moves, hanging,
+    compactError }
 }
 
 type Raise = { session: { append: (input: never) => Promise<unknown> } }
@@ -1021,6 +1025,27 @@ describe('turn events', () => {
     expect(w.turns()[0]?.source).toBe('person')
   })
 
+  test("a /compact stored between queued prompts, still being stored as the turn starts, is never the earlier prompt turn's row", async ($, on) => {
+    // The reader makes a typed /compact a command turn of its own. Taken as a loose row, it went to the prompt turn
+    // before it, whose finished end then named a row of another turn, which core leaves unresolved.
+    const w = world(on)
+    const K = 'c1111111-1111-4111-8111-111111111111'
+    const P2 = 'a5555555-5555-4555-8555-555555555555'
+    await prompt($, P1)
+    const held = w.hold(K)
+    const storing = row($, K, 'note', { kind: 'engine' }, { type: 'user', content: [{ type: 'text', text: '/compact' }] })
+    await held.reached
+    await prompt($, P2)
+    await $.turn.start({ text: 'all', turnId: 't1' })
+    w.disk.push(P1, K, P2)
+    held.release()
+    await storing
+    for (let i = 0; i < 30 && !w.turns().some((t) => t.type === 'ended' && t.turn === P1); i++) await w.clock.advance(100)
+    expect(w.turns().filter((t) => t.kind === 'prompt').map((t) => [t.type, t.turn, t.ref])).toEqual(
+      [['started', P1, P1], ['ended', P1, P1], ['started', P2, P2]])
+  })
+
+
   test("a row Claude stores with a queued prompt before the next one is that turn's last row, even one still being stored", async ($, on) => {
     // The reader groups such a row (hook context, say) with the prompt before it, so that turn's end names it; an end
     // naming only the prompt row would cut a plugin's read of the turn short.
@@ -1111,7 +1136,7 @@ describe('turn events', () => {
     await $.turn.complete(complete('t1') as never)
     w.disk.push(U1, R1, D1)
     for (let i = 0; i < 25 && !w.turns().some((t) => t.type === 'ended'); i++) await w.clock.advance(100)
-    await $.session.compact({ trigger: 'manual', messages: [] } as never)
+    await $.session.compact({ trigger: 'manual', messages: [{ role: 'user', text: 'Earlier', toolUses: [] }] } as never)
     await unstamped(U2)
     await prompt($, P2)  // a real row: the span ends here
     await $.turn.start({ text: 'two', turnId: 't2' })
@@ -1464,7 +1489,7 @@ describe('turn events', () => {
     const caveat = (uuid: string) => row($, uuid, 'command', { kind: 'unclassified' }, { type: 'user', isMeta: true,
       content: [{ type: 'text', text: '<local-command-caveat>Caveat</local-command-caveat>' }] })
     await answer($, R1)
-    await $.session.compact({ trigger: 'manual', messages: [] } as never)
+    await $.session.compact({ trigger: 'manual', messages: [{ role: 'user', text: 'Earlier', toolUses: [] }] } as never)
     await caveat(C1)
     await prompt($, P1)  // a real row: the span ends
     await $.turn.start({ text: 'go', turnId: 't1' })
@@ -1474,6 +1499,53 @@ describe('turn events', () => {
     await w.clock.settle()
     expect(w.turns().filter((t) => t.type === 'started').map((t) => [t.kind, t.turn])).toEqual([['prompt', P1], ['command', C2]])
   })
+
+
+  test("a /compact is a command turn from its own row to the end of its compaction, typed or run by mv2", async ($, on) => {
+    // No row after it reaches the mod (the compaction writes its rows straight to the file), so its end is the
+    // compaction returning; reported as a prompt at the next start, it was the wrong kind, late, and not named by its run.
+    // Claude writes its row to the file only after the compaction, so its start waits for that too: sent at once, core
+    // couldn't find the row and published it unresolved (seen live on 2.1.332).
+    const w = world(on)
+    const C1 = 'c1111111-1111-4111-8111-111111111111'
+    const C2 = 'c2222222-2222-4222-8222-222222222222'
+    const C3 = 'c3333333-3333-4333-8333-333333333333'
+    const compaction = (trigger = 'manual') =>
+      $.session.compact({ trigger, messages: [{ role: 'user', text: 'Earlier', toolUses: [] }] } as never)
+    await answer($, R1)
+    await row($, C1, 'note', { kind: 'engine' }, { type: 'user', content: [{ type: 'text', text: '/compact' }] })  // typed
+    await w.clock.settle()
+    expect(w.turns()).toEqual([])
+    w.disk.push(C1)
+    await compaction()
+    await w.clock.advance(200)
+    expect(w.turns()).toEqual([{ type: 'started', turn: C1, kind: 'command', ref: C1, source: 'person', first_task: false },
+      { type: 'ended', turn: C1, kind: 'command', ref: C1, state: 'finished' }])
+    // Run by mv2: a prompt the plugin submitted, named by the run.
+    await $.session.receive({ origin: { kind: 'peer' }, text: `<<MV2 command id=${RUN}>>${JSON.stringify({ command: 'compact', args: '' })}<</MV2>>` })
+    await w.clock.settle()
+    await row($, C2, 'prompt', { kind: 'plugin', name: 'multiverse', asUser: true }, { type: 'user', content: [{ type: 'text', text: '/compact' }] })
+    w.disk.push(C2)
+    await compaction()
+    await w.clock.advance(200)
+    expect(w.turns().slice(2)).toEqual([
+      { type: 'started', turn: C2, kind: 'command', ref: C2, source: 'person', attempt: RUN, first_task: false },
+      { type: 'ended', turn: C2, kind: 'command', ref: C2, state: 'finished' }])
+    // One whose compaction never comes: an automatic compaction isn't its, and once another turn has started, a
+    // later compaction isn't either; the next start records its end.
+    await row($, C3, 'note', { kind: 'engine' }, { type: 'user', content: [{ type: 'text', text: '/compact' }] })
+    w.disk.push(C3)
+    await compaction('auto')
+    await w.clock.advance(300)
+    expect(w.turns().slice(4)).toEqual([])
+    await prompt($, P1)
+    w.disk.push(P1)
+    await $.turn.start({ text: 'go', turnId: 't1' })
+    await compaction()
+    await w.clock.advance(300)
+    expect(w.turns().slice(4).map((t) => [t.type, t.kind, t.turn])).toEqual([['started', 'command', C3], ['started', 'prompt', P1]])
+  })
+
 
   test("an end a /clear overtakes is still proved in its own conversation's file", async ($, on) => {
     // Its proof read the file Claude named as current, and stopped at the /clear: the end went with no row, and core
@@ -1494,6 +1566,47 @@ describe('turn events', () => {
     expect(w.turns().filter((t) => t.type === 'ended').map((t) => [t.turn, t.ref])).toEqual([[P1, D1]])
     expect([...new Set(w.paths)]).toEqual([old])
     await w.clock.advance(6000)  // the /clear's own wait for Claude's process file runs out before the test ends
+  })
+
+  test("a /compact that compacts nothing is named by the caveat Claude stores it under, and opens no compaction span", async ($, on) => {
+    // Claude 2.1.332 stores it as a local command's rows ("Not enough messages to compact."): its caveat, then the
+    // /compact row the mod sees, then its output, and no boundary. Its start named the /compact row, which isn't its
+    // turn's first, and session.compact marked a span that hid the next command's caveat (qa-claude's Q-3).
+    const w = world(on)
+    const typed = (uuid: string) => row($, uuid, 'note', { kind: 'engine' }, { type: 'user', content: [{ type: 'text', text: '/compact' }] })
+    const [K, X, O] = ['c1111111-1111-4111-8111-111111111111', 'c2222222-2222-4222-8222-222222222222', 'c3333333-3333-4333-8333-333333333333']
+    const [V, N, S] = ['c4444444-4444-4444-8444-444444444444', 'c5555555-5555-4555-8555-555555555555', 'c6666666-6666-4666-8666-666666666666']
+    const ours = { kind: 'plugin', name: 'multiverse' }
+    await answer($, R1)
+    await typed(X)
+    w.compactError.message = 'Not enough messages to compact.'
+    await $.session.compact({ trigger: 'manual', messages: [{ role: 'user', text: 'Earlier', toolUses: [] }] } as never)
+      .then(() => undefined, () => undefined)
+    w.compactError.message = undefined
+    w.disk.push({ type: 'user', uuid: K, isMeta: true }, { type: 'user', uuid: X, parentUuid: K }, { type: 'system', uuid: O, parentUuid: X })
+    await row($, V, 'command', ours, { type: 'user', isMeta: true, content: [{ type: 'text', text: '<local-command-caveat>Caveat</local-command-caveat>' }] })
+    await row($, N, 'command', ours, { type: 'user', content: [{ type: 'text', text: '<command-name>/reload-plugins</command-name>' }] })
+    await row($, S, 'command', { kind: 'engine' }, { type: 'system', name: 'local_command', content: [{ type: 'text', text: '<local-command-stdout>Reloaded</local-command-stdout>' }] })
+    w.disk.push(V, N, S)
+    for (let i = 0; i < 40 && w.turns().filter((t) => t.type === 'ended').length < 2; i++) await w.clock.advance(100)
+    expect(w.turns().map((t) => [t.type, t.turn, t.ref, t.state ?? null])).toEqual([
+      ['started', K, K, null], ['ended', K, O, 'error'], ['started', V, V, null], ['ended', V, S, 'finished']])
+  })
+
+  test("a command mv2 runs right after a compaction opens its turn: its stamped caveat ends the span", async ($, on) => {
+    // The reader ends a span at the first row with an origin, before labelling it, so mv2's stamped caveat opens its
+    // command; counted inside the span, the mod started nothing, and that command got no events.
+    const w = world(on)
+    const [V, N, S] = ['c4444444-4444-4444-8444-444444444444', 'c5555555-5555-4555-8555-555555555555', 'c6666666-6666-4666-8666-666666666666']
+    const ours = { kind: 'plugin', name: 'multiverse' }
+    await answer($, R1)
+    await $.session.compact({ trigger: 'manual', messages: [{ role: 'user', text: 'Earlier', toolUses: [] }] } as never)
+    await row($, V, 'command', ours, { type: 'user', isMeta: true, content: [{ type: 'text', text: '<local-command-caveat>Caveat</local-command-caveat>' }] })
+    await row($, N, 'command', ours, { type: 'user', content: [{ type: 'text', text: '<command-name>/reload-plugins</command-name>' }] })
+    await row($, S, 'command', { kind: 'engine' }, { type: 'system', name: 'local_command', content: [{ type: 'text', text: '<local-command-stdout>Reloaded</local-command-stdout>' }] })
+    w.disk.push(V, N, S)
+    for (let i = 0; i < 30 && !w.turns().some((t) => t.type === 'ended'); i++) await w.clock.advance(100)
+    expect(w.turns().map((t) => [t.type, t.kind, t.turn, t.ref])).toEqual([['started', 'command', V, V], ['ended', 'command', V, S]])
   })
 
   test("a turn an automatic compaction cuts mid-turn ends at its last row after the boundary, and a join after it names the turn", async ($, on) => {
@@ -1517,6 +1630,45 @@ describe('turn events', () => {
     await $.turn.complete(complete('t1') as never)
     for (let i = 0; i < 30 && !w.turns().some((t) => t.type === 'ended'); i++) await w.clock.advance(100)
     expect(w.turns().map((t) => [t.type, t.turn, t.ref])).toEqual([['started', P1, P1], ['joined', P1, J1], ['ended', P1, D2]])
+  })
+
+  test("a /compact whose compaction never completes never holds up what comes after it", async ($, on) => {
+    // Its start waits for the compaction, so one that never comes (Claude's "No messages to compact" raises no
+    // session.compact) held every later edge until the next turn; one that failed or was cancelled (Esc aborts its
+    // request) skipped its release. A command after it lets its start go first; a failed compaction ends it. A typed
+    // /compact right after a local command's output isn't that command's report: it is a note, but not meta.
+    const w = world(on)
+    const C1 = 'c1111111-1111-4111-8111-111111111111'
+    const C2 = 'c2222222-2222-4222-8222-222222222222'
+    const K1 = 'c4444444-4444-4444-8444-444444444444'
+    const K2 = 'c5555555-5555-4555-8555-555555555555'
+    const typed = (uuid: string) => row($, uuid, 'note', { kind: 'engine' }, { type: 'user', content: [{ type: 'text', text: '/compact' }] })
+    const command = (uuid: string, text: string) =>
+      row($, uuid, 'command', { kind: 'engine' }, { type: 'system', name: 'local_command', content: [{ type: 'text', text }] })
+    const compaction = () => $.session.compact({ trigger: 'manual', messages: [{ role: 'user', text: 'Earlier', toolUses: [] }] } as never)
+      .then(() => undefined, () => undefined)
+    await answer($, R1)
+    // Never compacting, and still being stored when the next command arrives: its start goes first, once noted.
+    const held = w.hold(C1)
+    const storing = typed(C1)
+    await held.reached
+    await command(K1, '<command-name>/context</command-name>')
+    await command(K2, '<local-command-stdout>Context usage</local-command-stdout>')
+    held.release()
+    await storing
+    w.disk.push(C1, K1, K2)
+    for (let i = 0; i < 25; i++) await w.clock.advance(100)
+    expect(w.turns().map((t) => [t.type, t.kind, t.turn])).toEqual([['started', 'command', C1], ['started', 'command', K1], ['ended', 'command', K1]])
+    // Failed: its start goes and it ends as an error. (The kit hands the plugin its own error for a failing hook;
+    // Esc's "API Error: Request was aborted." on Claude Code 2.1.332 ends it interrupted.)
+    const before = w.turns().length
+    await typed(C2)
+    w.disk.push(C2)
+    w.compactError.message = 'API Error: overloaded'
+    await compaction()
+    w.compactError.message = undefined
+    for (let i = 0; i < 25 && w.turns().length < before + 2; i++) await w.clock.advance(100)
+    expect(w.turns().slice(before).map((t) => [t.type, t.turn, t.state ?? null])).toEqual([['started', C2, null], ['ended', C2, 'error']])
   })
 
 })
