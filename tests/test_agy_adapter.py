@@ -3521,6 +3521,148 @@ class AgyAdapterUnitTest(BaseTest):
                 turn='post:32:1', ref='inj:32:1:2', source='harness'))
             self.assertIsNone(lost.row_position)
 
+            # 11. As live on agy 1.5.18: a background task finishes right after a turn's reply, and agy invokes the
+            #     model again (invocationNum 1, no Stop) with its notice at step-{initialNumSteps}. The transcript
+            #     opens a new turn there, so the reply's turn ends finished and the harness's turn starts. A steer
+            #     queued meanwhile waits (which of the two agy would store first is unknown) and goes in at that
+            #     turn's end as a turn of its own.
+            append_rows({'step_index': 42, 'source': 'USER_EXPLICIT', 'type': 'USER_INPUT', 'status': 'DONE',
+                         'created_at': '2026-11-24T10:06:20Z', 'content': '<USER_REQUEST>\nsay TYPED\n</USER_REQUEST>'})
+            agy_bridge.handle_hook('PreInvocation', {
+                'conversationId': conv1, 'invocationNum': 0, 'initialNumSteps': 43,
+            }, env=env)
+            append_rows(response_row(43, 'TYPED'))
+            self.assertEqual(agy_bridge.handle_hook('PostInvocation', {
+                'conversationId': conv1, 'invocationNum': 0, 'initialNumSteps': 43,
+            }, env=env), {})
+            s4_id = steer_message('S4')
+            self.assertEqual(agy_bridge.handle_hook('PreInvocation', {
+                'conversationId': conv1, 'invocationNum': 1, 'initialNumSteps': 44,
+            }, env=env), {})
+            append_rows(
+                {'step_index': 44, 'source': 'SYSTEM', 'type': 'SYSTEM_MESSAGE', 'status': 'DONE',
+                 'created_at': '2026-11-24T10:06:30Z',
+                 'content': f'<SYSTEM_MESSAGE>\n[Message] timestamp=2026-11-24T10:06:30Z sender={conv1}/task-9 '
+                            'priority=MESSAGE_PRIORITY_HIGH content=done\n</SYSTEM_MESSAGE>'},
+                response_row(45, 'task done'),
+            )
+            self.assertEqual(agy_bridge.handle_hook('PostInvocation', {
+                'conversationId': conv1, 'invocationNum': 1, 'initialNumSteps': 44,
+            }, env=env), inject('S4'))
+            append_rows(injected_row(46, '2026-11-24T10:06:31Z', 'S4'))
+            agy_bridge.handle_hook('PreInvocation', {
+                'conversationId': conv1, 'invocationNum': 2, 'initialNumSteps': 47,
+            }, env=env)
+            append_rows(response_row(47, 'S4 done'))
+            agy_bridge.handle_hook('Stop', {'conversationId': conv1, 'fullyIdle': True}, env=env)
+            rows = {row.ref: row.label for row in adapter.transcript_view(sess_obj).rows}
+            self.assertEqual((rows['step-44'], rows['step-46']), ('prompt', 'prompt'))
+            events = [(kind, data.get('source'), data.get('message'),
+                       core_transcripts._unpack(data['ref'], core_transcripts.CURSOR_PREFIX)['r'] if data['ref'] else None,
+                       data['resolved']) for kind, data in drain_all() if kind.startswith('turn.')]
+            self.assertEqual(events, [
+                ('turn.started', 'person', None, 'step-42', True),
+                ('turn.ended', None, None, 'step-43', True),
+                ('turn.started', 'harness', None, 'step-44', True),
+                ('turn.ended', None, None, 'step-45', True),
+                ('turn.started', 'mv2', s4_id, 'step-46', True),
+                ('turn.ended', None, None, 'step-47', True),
+            ])
+
+            # 12. agy invokes the model again after a reply for some other reason, and the transcript keeps one turn:
+            #     another hook's force_continue with no input, a server-restart notice (housekeeping, not an input),
+            #     or a reply with no text (not a turn end, so a follow-up waits for the real end). None of them
+            #     splits the turn. An input the transcript opens a turn at still does, even when Esc stops agy
+            #     during that turn's tool call, so neither PostInvocation nor Stop comes.
+            def hook(event, **payload):
+                return agy_bridge.handle_hook(event, {'conversationId': conv1, **payload}, env=env)
+
+            def typed_row(step, text):
+                return {'step_index': step, 'source': 'USER_EXPLICIT', 'type': 'USER_INPUT', 'status': 'DONE',
+                        'created_at': '2026-11-24T10:07:00Z', 'content': f'<USER_REQUEST>\n{text}\n</USER_REQUEST>'}
+
+            def busy_follow_up(text):
+                msg = append_message(agent_dir, text, {'name': 'lead'}, 'follow-up', target_session=conv1)
+                update_message(agent_dir, msg['id'], submission_state='accepted', delivery_method='native', attempts=[{
+                    'state': 'native_queued', 'mode': 'follow-up', 'message_id': msg['id'],
+                    'native_session_id': conv1, 'launch_id': launch_id, 'at': now(),
+                }])
+                agy_bridge.write_receipt(agent_dir, msg['id'], launch_id=launch_id, native_id=conv1,
+                                         route='hook-user-input', submitted_at=now(),
+                                         text_sha256=agy_storage.message_hash(text))
+                agy_bridge.enqueue_message(agent_dir, launch_id, msg['id'], conv1, text)
+                return msg['id']
+
+            restart_row = {'step_index': 53, 'source': 'SYSTEM', 'type': 'SYSTEM_MESSAGE', 'status': 'DONE',
+                           'created_at': '2026-11-24T10:07:05Z',
+                           'content': ('<SYSTEM_MESSAGE>\n[Message] timestamp=2026-11-24T10:07:05Z sender=system '
+                                       'priority=MESSAGE_PRIORITY_LOW content=[Notice] All your subagents and '
+                                       'background tasks have been stopped due to server restart.\n</SYSTEM_MESSAGE>')}
+            append_rows(typed_row(48, 'say A'))
+            hook('PreInvocation', invocationNum=0, initialNumSteps=49)
+            append_rows(response_row(49, 'A'))
+            self.assertEqual(hook('PostInvocation', invocationNum=0, initialNumSteps=49), {})
+            self.assertEqual(hook('PreInvocation', invocationNum=1, initialNumSteps=50), {})
+            append_rows(response_row(50, 'A again'))
+            hook('PostInvocation', invocationNum=1, initialNumSteps=50)
+            hook('Stop', fullyIdle=True)
+            append_rows(typed_row(51, 'say B'))
+            hook('PreInvocation', invocationNum=0, initialNumSteps=52)
+            append_rows(response_row(52, 'B'))
+            hook('PostInvocation', invocationNum=0, initialNumSteps=52)
+            hook('PreInvocation', invocationNum=1, initialNumSteps=53)
+            append_rows(restart_row, response_row(54, 'B again'))
+            hook('PostInvocation', invocationNum=1, initialNumSteps=53)
+            hook('Stop', fullyIdle=True)
+            append_rows(typed_row(55, 'say C'))
+            hook('PreInvocation', invocationNum=0, initialNumSteps=56)
+            f_id = busy_follow_up('F')
+            append_rows({**response_row(56, ''), 'content': ''})
+            self.assertEqual(hook('PostInvocation', invocationNum=0, initialNumSteps=56), {})
+            self.assertEqual(agy_bridge.followup_state(agent_dir, launch_id, f_id), 'queued')
+            hook('PreInvocation', invocationNum=1, initialNumSteps=57)
+            append_rows(response_row(57, 'C'))
+            self.assertEqual(hook('PostInvocation', invocationNum=1, initialNumSteps=57), inject('F'))
+            append_rows(injected_row(58, '2026-11-24T10:07:10Z', 'F'))
+            hook('PreInvocation', invocationNum=2, initialNumSteps=59)
+            append_rows(response_row(59, 'F done'))
+            hook('Stop', fullyIdle=True)
+            append_rows(typed_row(60, 'say D'))
+            hook('PreInvocation', invocationNum=0, initialNumSteps=61)
+            append_rows(response_row(61, 'D'))
+            hook('PostInvocation', invocationNum=0, initialNumSteps=61)
+            self.assertEqual(hook('PreInvocation', invocationNum=1, initialNumSteps=62), {})
+            append_rows(
+                {'step_index': 62, 'source': 'SYSTEM', 'type': 'SYSTEM_MESSAGE', 'status': 'DONE',
+                 'created_at': '2026-11-24T10:07:20Z',
+                 'content': f'<SYSTEM_MESSAGE>\n[Message] timestamp=2026-11-24T10:07:20Z sender={conv1}/task-10 '
+                            'priority=MESSAGE_PRIORITY_HIGH content=done\n</SYSTEM_MESSAGE>'},
+                {'step_index': 63, 'source': 'MODEL', 'type': 'PLANNER_RESPONSE', 'status': 'DONE',
+                 'created_at': '2026-11-24T10:07:21Z', 'tool_calls': [{'name': 'run_command', 'args': {}}]},
+            )
+            agy_bridge.handle_statusline({'conversation_id': conv1, 'agent_state': 'idle'}, env=env)
+            agy_bridge.handle_statusline({'conversation_id': conv1, 'agent_state': 'idle'}, env=env)
+            rows = {row.ref: row.label for row in adapter.transcript_view(sess_obj).rows}
+            self.assertEqual([rows[f'step-{step}'] for step in (50, 53, 56, 62)],
+                             ['response', 'injected', 'response', 'prompt'])
+            events = [(kind, data.get('source'), data.get('message'), data.get('state'),
+                       core_transcripts._unpack(data['ref'], core_transcripts.CURSOR_PREFIX)['r'] if data['ref'] else None,
+                       data['resolved']) for kind, data in drain_all() if kind.startswith('turn.')]
+            self.assertEqual(events, [
+                ('turn.started', 'person', None, None, 'step-48', True),
+                ('turn.ended', None, None, 'finished', 'step-50', True),
+                ('turn.started', 'person', None, None, 'step-51', True),
+                ('turn.ended', None, None, 'finished', 'step-54', True),
+                ('turn.started', 'person', None, None, 'step-55', True),
+                ('turn.ended', None, None, 'finished', 'step-57', True),
+                ('turn.started', 'mv2', f_id, None, 'step-58', True),
+                ('turn.ended', None, None, 'finished', 'step-59', True),
+                ('turn.started', 'person', None, None, 'step-60', True),
+                ('turn.ended', None, None, 'finished', 'step-61', True),
+                ('turn.started', 'harness', None, None, 'step-62', True),
+                ('turn.ended', None, None, 'interrupted', 'step-63', True),
+            ])
+
     def test_hooks_pin_launch_id_and_post_invocation_yields_to_idle_at_continuation_cap(self):
         """Retained .agents/hooks.json from an earlier resumed launch must never pop the current launch's queue,
         and PostInvocation must yield to Stop and an idle wake after MAX_POST_CONTINUATIONS chained messages, so an

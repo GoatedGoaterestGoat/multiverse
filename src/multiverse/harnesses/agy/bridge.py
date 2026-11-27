@@ -461,6 +461,7 @@ def _load_followups_record_locked(path: Path) -> dict:
             'last_init_steps': None,
             'post_continue_streak': 0,
             'last_post_end_step': None,
+            'reply_end': None,
         }
     except OSError as error:
         detail = error.strerror or str(error)
@@ -481,6 +482,7 @@ def _load_followups_record_locked(path: Path) -> dict:
     raw_last_post_step = record.get('last_post_end_step')
     last_post_step = (raw_last_post_step if type(raw_last_post_step) is int and raw_last_post_step >= 0 else None)
     return {
+        'reply_end': _reply_end(record.get('reply_end')),
         'entries': list(record['entries']),
         'idle_flushed': bool(record.get('idle_flushed')),
         'idle_flushed_at': _opt_timestamp(record.get('idle_flushed_at')),
@@ -533,7 +535,8 @@ def _save_followups_locked(path: Path, launch_id: str, entries: list[dict], *,
                            pending_idle_attempt_at: str | None = None,
                            last_init_steps: int | None = None,
                            post_continue_streak: int = 0,
-                           last_post_end_step: int | None = None) -> None:
+                           last_post_end_step: int | None = None,
+                           reply_end: dict | None = None) -> None:
     canonical_launch = normalize_session_id(launch_id)
     # Never keep message text on already handed-off entries so delivered prompts cannot exhaust the queue budget.
     cleaned = []
@@ -575,6 +578,7 @@ def _save_followups_locked(path: Path, launch_id: str, entries: list[dict], *,
         'last_init_steps': last_init_steps if type(last_init_steps) is int and last_init_steps >= 1 else None,
         'post_continue_streak': max(0, int(post_continue_streak)),
         'last_post_end_step': last_post_end_step if type(last_post_end_step) is int and last_post_end_step >= 0 else None,
+        'reply_end': _reply_end(reply_end) if turn_open else None,
         'entries': entries,
     }
     _write_private_json(path, payload, max_bytes=MAX_QUEUE_BYTES)
@@ -600,7 +604,93 @@ def _save_record_locked(path: Path, launch_id: str, rec: dict) -> None:
         last_init_steps=rec.get('last_init_steps'),
         post_continue_streak=rec.get('post_continue_streak', 0),
         last_post_end_step=rec.get('last_post_end_step'),
+        reply_end=rec.get('reply_end'),
     )
+
+
+def _reply_end(value) -> dict | None:
+    """`{'turn', 'step'}`: the open turn's reply PostInvocation saw end it, with nothing injected after it.
+
+    Once agy invokes the model again at `steps` (its initialNumSteps) before storing what it took in, it also holds
+    `steps` and `seq` until a later hook reads that (`_settle_after_reply_locked`).
+    """
+    if not (isinstance(value, dict) and isinstance(value.get('turn'), str) and value['turn']
+            and type(value.get('step')) is int and value['step'] >= 0):
+        return None
+    found = {'turn': value['turn'], 'step': value['step']}
+    steps, seq = value.get('steps'), value.get('seq')
+    if type(steps) is int and steps > value['step'] and type(seq) is int and seq >= 0:
+        found.update(steps=steps, seq=seq)
+    return found
+
+
+def _input_after_reply(rows: list[dict] | None, reply_step: int) -> tuple[str, str | None]:
+    """What agy stored after a turn-ending reply at `reply_step`, read as the transcript reader groups rows.
+
+    `('opened', source)` when the first input after it opens a turn (`source` is `person` or `harness`),
+    `('continued', None)` when a response comes first (agy went on with that turn), and `('unknown', None)` while
+    neither is stored.
+    """
+    after = sorted(
+        (row for row in rows or () if type(row.get('step_index')) is int and row['step_index'] > reply_step),
+        key=lambda row: row['step_index'],
+    )
+    turn_open = False
+    for row in after:
+        _, label, source, _, _, _, next_open, _ = transcripts._classify_row(row, turn_open=turn_open)
+        if label == 'prompt':
+            return 'opened', 'person' if source == 'human' else 'harness'
+        if label == 'response':
+            return 'continued', None
+        turn_open = next_open
+    return 'unknown', None
+
+
+def _publish_turn_edges(agent_dir, launch_id: str, conv_id: str, edges: tuple) -> None:
+    root = _universe_root(agent_dir)
+    if root is None or not edges or not conv_id:
+        return
+    try:
+        from multiverse.universe import agents
+        agents.mutate_runtime(Path(agent_dir), normalize_session_id(launch_id), lambda _facts: None,
+                              turn_batch=(root, normalize_session_id(conv_id), tuple(edges)))
+    except (OSError, ValueError):
+        pass
+
+
+def _settle_after_reply_locked(agent_dir, launch_id: str | None, conv_id: str | None, rec: dict, *,
+                               final: bool) -> bool:
+    """Decide a model call agy made after a turn-ending reply, once it has stored what it took in; True if `rec` changed.
+
+    If the transcript opens a turn at that input (a background task's notice), the reply's turn ends finished and
+    the new one starts, published here before the caller's own edges. If a response comes first, or nothing came by
+    the time a `final` caller closes the turn, the turn simply went on.
+    """
+    marker = rec.get('reply_end')
+    if not (isinstance(marker, dict) and 'steps' in marker):
+        return False
+    rec['reply_end'] = None
+    if not (rec.get('turn_open') and rec.get('turn_id') == marker['turn'] and launch_id and conv_id):
+        return True
+    reply_step = marker['step']
+    rows = _read_transcript_tail(
+        Path(agent_dir), conv_id, None,
+        covers=lambda found: any(row.get('step_index') == reply_step for row in found),
+    )
+    state, source = _input_after_reply(rows, reply_step)
+    if state == 'unknown' and not final:
+        rec['reply_end'] = marker
+        return False
+    if state == 'opened':
+        turn_id = f'init:{marker["steps"]}:{marker["seq"]}'
+        _publish_turn_edges(agent_dir, launch_id, conv_id, _turn_end_edges(marker['turn'], 'finished') + (
+            TurnStarted(turn=turn_id, kind='prompt', ref=turn_id, source=source, attempt=None, first_task=False),
+        ))
+        rec['turn_id'] = turn_id
+        rec['last_init_steps'] = marker['steps']
+        rec['post_continue_streak'] = 0
+        rec['injected_at'] = None
+    return True
 
 
 def _turn_end_edges(turn_id: str | None, state: str) -> tuple[TurnEnded, ...]:
@@ -617,7 +707,8 @@ def _universe_root(agent_dir) -> Path | None:
 
 def _reap_followups_locked(agent_dir, rec: dict, *, live_facts: dict | None = None,
                            observed_idle: bool = False, conv_id: str | None = None,
-                           pause_on_idle_reap: bool = True) -> tuple[bool, bool, str | None]:
+                           pause_on_idle_reap: bool = True,
+                           launch_id: str | None = None) -> tuple[bool, bool, str | None]:
     """Re-check and expire bounded delivery state against live evidence so no missed Stop hook strands or auto-flushes.
 
     Returns `(changed, cancelled_by_idle, closed_turn_id)` where `cancelled_by_idle` is True when an active turn
@@ -731,6 +822,8 @@ def _reap_followups_locked(agent_dir, rec: dict, *, live_facts: dict | None = No
             rec['turn_seq'] = rec['turn_seq'] + 1
             if pause_on_idle_reap:
                 if rec.get('turn_open'):
+                    launch = launch_id or (live_facts.get('launch_id') if isinstance(live_facts, dict) else None)
+                    _settle_after_reply_locked(agent_dir, launch, conv_id, rec, final=True)
                     closed_turn_id = rec.get('turn_id')
                     rec['turn_open'] = False
                     rec['turn_id'] = None
@@ -945,7 +1038,7 @@ def claim_if_idle_head(agent_dir, launch_id: str, message_id: str, native_id: st
             return 'queued'
         rec = _load_followups_record_locked(queue_path)
         reaped, cancelled, closed_turn = _reap_followups_locked(
-            agent_dir, rec, live_facts=current_facts, conv_id=canonical_conv,
+            agent_dir, rec, live_facts=current_facts, conv_id=canonical_conv, launch_id=canonical_launch,
         )
         if cancelled:
             # This send is a new idle send: it resumes what the reaper just paused, as resume_paused_for_new_send does.
@@ -1143,8 +1236,9 @@ def _pause_followups(agent_dir, launch_id: str, native_id: str, *, reason: str, 
                     or current_props.get('native_session_id') != canonical_conv):
                 return
             rec = _load_followups_record_locked(queue_path)
+            settled = _settle_after_reply_locked(agent_dir, canonical_launch, canonical_conv, rec, final=True)
             closed_turn = rec.get('turn_id') if rec.get('turn_open') else None
-            changed = (bool(rec['idle_flushed']) or (rec['turn_active'] != bool(turn_active))
+            changed = settled or (bool(rec['idle_flushed']) or (rec['turn_active'] != bool(turn_active))
                        or bool(rec.get('turn_open'))
                        or (next_source is not None and rec.get('pending_turn_source') != next_source))
             for entry in rec['entries']:
@@ -1218,7 +1312,7 @@ def resume_paused_for_new_send(agent_dir, launch_id: str, native_id: str, *, mod
                 return False
             rec = _load_followups_record_locked(queue_path)
             reaped, cancelled, closed_turn = _reap_followups_locked(
-                agent_dir, rec, live_facts=current_facts, conv_id=canonical_conv,
+                agent_dir, rec, live_facts=current_facts, conv_id=canonical_conv, launch_id=canonical_launch,
             )
             unpaused = _resume_paused_locked(rec, canonical_conv, mode)
             if not unpaused and not reaped:
@@ -1301,7 +1395,7 @@ def _last_non_system_row(rows: list[dict] | None) -> dict | None:
 
 
 def _is_turn_ending_planner_response(rows: list[dict] | None, initial_num_steps=None) -> tuple[bool, int | None]:
-    """True with `step_index` when the last non-system step is a completed `PLANNER_RESPONSE` without tool calls.
+    """True with `step_index` when the last non-system step is a completed `PLANNER_RESPONSE` with text and no tool calls.
 
     With `initial_num_steps` (PostInvocation's payload), the response must belong to this invocation
     (`step_index >= initialNumSteps`), never an earlier turn's reply read before agy wrote this one.
@@ -1314,6 +1408,8 @@ def _is_turn_ending_planner_response(rows: list[dict] | None, initial_num_steps=
     tools = row.get('tool_calls')
     if isinstance(tools, list) and len(tools) > 0:
         return False, None
+    if not any(isinstance(row.get(key), str) and row[key].strip() for key in ('content', 'response', 'text')):
+        return False, None  # the transcript ends a turn only at a reply with text; agy goes on after one without
     step_idx = row.get('step_index')
     if type(initial_num_steps) is int and initial_num_steps >= 1 and not (type(step_idx) is int and step_idx >= initial_num_steps):
         return False, None
@@ -1322,11 +1418,15 @@ def _is_turn_ending_planner_response(rows: list[dict] | None, initial_num_steps=
 
 def _on_turn_start(agent_dir, launch_id: str, native_id: str | None, *,
                    invocation_num=None, initial_num_steps=None,
-                   env: Mapping[str, str] | None = None) -> tuple[tuple[TurnStarted | TurnJoined, ...], list[str]]:
+                   env: Mapping[str, str] | None = None) -> tuple[tuple[TurnStarted | TurnJoined | TurnEnded, ...], list[str]]:
     """Advance `turn_seq`, handle `PreInvocation` `userMessage` injections, and return `(edges, injected_texts)`.
 
     Every message injected here gets its own edge: the one a new turn opens with is its `TurnStarted`, and each
-    other one (the rest of a batch, or any injection into a running turn) is a `TurnJoined` of that turn.
+    other one (the rest of a batch, or any injection into a running turn) is a `TurnJoined` of that turn. When
+    agy invokes the model again right after a reply that ended the turn, the turn is split only where the transcript
+    opens a new one: at an input stored before this call (another hook's message), or one agy stores after it (a
+    background task's notice at step-{initialNumSteps}), which a later hook reads (`_settle_after_reply_locked`);
+    queued steers wait for the next call meanwhile. Anything else (housekeeping, or no input) leaves the turn open.
     """
     try:
         queue_path, lock_path = _followups_paths(agent_dir, launch_id)
@@ -1382,8 +1482,45 @@ def _on_turn_start(agent_dir, launch_id: str, native_id: str | None, *,
                 and not rec.get('pending_turn_attempt')
                 and not (idle_attempt_active and rec.get('pending_idle_attempt'))
             )
+            # An earlier call's open question (what agy took in after a reply) is answered by now.
+            deferred = rec.get('reply_end')
+            _settle_after_reply_locked(
+                agent_dir, canonical_launch, canonical_conv, rec,
+                final=not (isinstance(deferred, dict) and deferred.get('steps') == init_steps),
+            )
+            reply_end = rec.pop('reply_end', None)
+            replied_edges: tuple[TurnEnded, ...] = ()
+            hold_steers = False
+            if (bool(rec.get('turn_open'))
+                    and inv_num is not None and inv_num > 0
+                    and init_steps is not None
+                    and not rec.get('pending_turn_attempt')
+                    and isinstance(reply_end, dict) and 'steps' not in reply_end
+                    and reply_end['turn'] == rec.get('turn_id')
+                    and reply_end['step'] < init_steps):
+                # agy calls the model again after the turn's reply. Rows it stored before this call show whether the
+                # transcript opens a turn there; one it stores after (a background task's notice) a later hook reads.
+                stored = _read_transcript_tail(
+                    Path(agent_dir), canonical_conv, env,
+                    covers=lambda found: any(row.get('step_index') == reply_end['step'] for row in found),
+                )
+                state, opener_source = _input_after_reply(
+                    [row for row in stored or () if type(row.get('step_index')) is int and row['step_index'] < init_steps],
+                    reply_end['step'],
+                )
+                if state == 'opened':
+                    replied_edges = _turn_end_edges(rec.get('turn_id'), 'finished')
+                    rec['turn_open'] = False
+                    rec['turn_id'] = None
+                    rec['pending_turn_source'] = opener_source
+                elif state == 'unknown':
+                    # Which of that input and a steer agy would store first is unknown, so a steer waits.
+                    hold_steers = True
+                    rec['reply_end'] = {**reply_end, 'steps': init_steps}
             starting_new = (not rec.get('turn_open')) or (inv_num == 0 and not same_open_turn)
             rec['turn_seq'] = rec['turn_seq'] + 1
+            if isinstance(rec.get('reply_end'), dict):
+                rec['reply_end']['seq'] = rec['turn_seq']
             rec['turn_active'] = True
             rec['turn_active_at'] = now()
             rec['idle_after_turn'] = 0
@@ -1429,8 +1566,9 @@ def _on_turn_start(agent_dir, launch_id: str, native_id: str | None, *,
                                 if not human_opener:
                                     wake_handed_off_id = entry['id']
                             break
-                # 2. Drain any queued steer entries via PreInvocation userMessage injection.
-                for entry in rec['entries']:
+                # 2. Drain any queued steer entries via PreInvocation userMessage injection, unless agy may store an
+                #    input of its own at this step (above), so a steer waits for the next call.
+                for entry in (() if hold_steers else rec['entries']):
                     if (entry.get('state', 'queued') == 'queued'
                             and entry.get('native_id') == canonical_conv
                             and _entry_mode(entry) == 'steer'
@@ -1446,7 +1584,7 @@ def _on_turn_start(agent_dir, launch_id: str, native_id: str | None, *,
                         if wake_handed_off_id is None and starting_new and not human_opener and not rec.get('pending_turn_attempt'):
                             wake_handed_off_id = entry['id']
 
-            edges: tuple[TurnStarted | TurnJoined, ...] = ()
+            edges: tuple[TurnStarted | TurnJoined | TurnEnded, ...] = replied_edges
             started_attempt = None
             if starting_new:
                 attempt = rec.get('pending_turn_attempt')
@@ -1500,7 +1638,7 @@ def _on_turn_start(agent_dir, launch_id: str, native_id: str | None, *,
                 rec['turn_id'] = turn_id
                 rec['pending_turn_attempt'] = None
                 rec['pending_turn_source'] = None
-                edges = (TurnStarted(
+                edges += (TurnStarted(
                     turn=turn_id, kind='prompt', ref=ref, source=source,
                     attempt=attempt, first_task=first_task,
                 ),)
@@ -2377,7 +2515,7 @@ def _flush_idle_followup(directory: Path, launch_id: str, properties: dict, conv
             current_facts = retry_missing(lambda: read(directory / 'runtime.json'))
             rec = _load_followups_record_locked(queue_path)
             reaped, cancelled, closed_turn = _reap_followups_locked(
-                directory, rec, live_facts=current_facts, conv_id=conv_id,
+                directory, rec, live_facts=current_facts, conv_id=conv_id, launch_id=launch_id,
             )
             if reaped:
                 _save_record_locked(queue_path, launch_id, rec)
@@ -2408,7 +2546,7 @@ def _flush_idle_followup(directory: Path, launch_id: str, properties: dict, conv
                 return False
             rec = _load_followups_record_locked(queue_path)
             reaped, cancelled, closed_turn = _reap_followups_locked(
-                directory, rec, live_facts=current_facts, conv_id=conv_id,
+                directory, rec, live_facts=current_facts, conv_id=conv_id, launch_id=launch_id,
             )
             if (rec['turn_active']
                     or _idle_flushed_active(rec['idle_flushed'], rec['idle_flushed_at'])
@@ -2503,6 +2641,7 @@ def _inspect_idle_followup(directory: Path, launch_id: str, conv_id: str, *,
             rec = _load_followups_record_locked(queue_path)
             reaped, cancelled, closed_turn = _reap_followups_locked(
                 directory, rec, live_facts=live_facts, observed_idle=observed_idle, conv_id=conv_id,
+                launch_id=launch_id,
             )
             if reaped:
                 _save_record_locked(queue_path, launch_id, rec)
@@ -2807,15 +2946,24 @@ def handle_hook(event: str, payload: dict, env=None, *, expected_launch_id: str 
             if not _hook_delivery_live(current_facts, current_props, launch_id, target_conv):
                 return {}
             rec = _load_followups_record_locked(queue_path)
+            settled = _settle_after_reply_locked(directory, launch_id, target_conv, rec, final=False)
             if end_step is not None and rec.get('last_post_end_step') == end_step:
+                if settled:
+                    _save_record_locked(queue_path, launch_id, rec)
                 return {}
             reaped, _, _ = _reap_followups_locked(
                 directory, rec, live_facts=current_facts, conv_id=target_conv, pause_on_idle_reap=False,
             )
+            reaped = reaped or settled
             post_streak = rec.get('post_continue_streak', 0)
             chosen = _next_queued_entry(rec['entries'], target_conv) if post_streak < MAX_POST_CONTINUATIONS else None
             if chosen is None:
-                if reaped:
+                # The turn has its reply. If agy still invokes the model again (the next PreInvocation, which uses
+                # this up), it took in an input of its own (a background task's notice): a new turn opens there.
+                reply_end = ({'turn': rec.get('turn_id'), 'step': end_step}
+                             if rec.get('turn_open') and end_step is not None else None)
+                if reaped or rec.get('reply_end') != reply_end:
+                    rec['reply_end'] = reply_end
                     _save_record_locked(queue_path, launch_id, rec)
                 return {}
             text = chosen['text']
@@ -2886,9 +3034,11 @@ def handle_hook(event: str, payload: dict, env=None, *, expected_launch_id: str 
                     or current_props.get('native_session_id') != target_conv):
                 return {}
             rec = _load_followups_record_locked(queue_path)
+            settled = _settle_after_reply_locked(directory, launch_id, target_conv, rec, final=True)
             reaped, _, _ = _reap_followups_locked(
                 directory, rec, live_facts=current_facts, conv_id=target_conv, pause_on_idle_reap=False,
             )
+            reaped = reaped or settled
             closed_turn = rec.get('turn_id') if rec.get('turn_open') else None
             end_edges = _turn_end_edges(closed_turn, 'finished')
             # Background work still running (fullyIdle false) does not hold messages back, but the next turn
