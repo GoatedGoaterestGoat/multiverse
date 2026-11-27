@@ -180,6 +180,40 @@ class ClaudeTurnProjectionTest(BaseTest):
             turn = next(turn for turn in transcripts.turns(self.root, self.agent).turns if turn.id == typed['uuid'])
             self.assertTrue(turn.finished)
 
+    def test_a_working_compact_s_caveat_is_in_the_compact_s_own_turn(self):
+        """A /compact that worked stores its caveat in its compaction's span, before the row that names it; read as
+        output, core put it in the last command turn before (an old /reload-plugins), which gained a row after its
+        end, and the /compact's turn lacked its first row (qa-claude's Q-4)."""
+        def user(uuid, parent, text, prompt, **more):
+            return {'type': 'user', 'uuid': uuid, 'parentUuid': parent, 'promptId': prompt, 'timestamp': '2026-11-27T10:00:00Z',
+                    'message': {'role': 'user', 'content': text}, **more}
+        caveat = '<local-command-caveat>Caveat</local-command-caveat>'
+        self.append(
+            user('r1', None, caveat, 'q1', isMeta=True),
+            user('r2', 'r1', '<command-name>/reload-plugins</command-name>', 'q1'),
+            {'type': 'system', 'subtype': 'local_command', 'uuid': 'r3', 'parentUuid': 'r2',
+             'content': '<local-command-stdout>Reloaded</local-command-stdout>'},
+            user('p1', 'r3', 'Say one.', 'q2', origin={'kind': 'plugin'}),
+            {'type': 'assistant', 'uuid': 'a1', 'parentUuid': 'p1',
+             'message': {'id': 'm1', 'role': 'assistant', 'content': [{'type': 'text', 'text': 'one'}], 'usage': {'output_tokens': 1}}},
+            {'type': 'system', 'subtype': 'turn_duration', 'uuid': 'd1', 'parentUuid': 'a1'},
+            {'type': 'system', 'subtype': 'compact_boundary', 'uuid': 'b1', 'parentUuid': None, 'logicalParentUuid': 'd1'},
+            user('s1', 'b1', 'This session is being continued.', 'q3', isCompactSummary=True),
+            user('c1', 's1', caveat, 'q3', isMeta=True),
+            user('c2', 'c1', '<command-name>/compact</command-name>', 'q3'),
+            user('c3', 'c2', '<local-command-stdout>Compacted</local-command-stdout>', 'q3'),
+            user('t1', 'c3', caveat, 'q4', isMeta=True),
+            user('t2', 't1', '<command-name>/reload-plugins</command-name>', 'q4'),
+            {'type': 'system', 'subtype': 'local_command', 'uuid': 't3', 'parentUuid': 't2',
+             'content': '<local-command-stdout>Reloaded</local-command-stdout>'})
+        page = transcripts.rows(self.root, self.agent, bodies=False)
+        turn = {row.ref: row.turn for row in page.rows}
+        self.assertEqual({ref: turn[ref] for ref in ('c1', 'c2', 'c3')}, {'c1': 'c1', 'c2': 'c1', 'c3': 'c1'})
+        self.assertEqual([ref for ref, of in turn.items() if of == 'r1'], ['r1', 'r2', 'r3'])  # the old command keeps its own
+        turns = {item.id: item for item in transcripts.turns(self.root, self.agent).turns}
+        self.assertEqual((turns['c1'].kind, turns['c1'].command, turns['c1'].finished), ('command', '/compact', True))
+        self.assertEqual([turn[ref] for ref in ('t1', 't2', 't3')], ['t1', 't1', 't1'])  # the command typed next: its own
+
     def test_appended_system_caveat_keeps_the_system_command_opening(self):
         """The new user caveat label must not promote legacy system command output to an opener."""
         fixture = ClaudeRows()

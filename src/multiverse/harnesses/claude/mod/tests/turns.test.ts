@@ -1136,7 +1136,7 @@ describe('turn events', () => {
     await $.turn.complete(complete('t1') as never)
     w.disk.push(U1, R1, D1)
     for (let i = 0; i < 25 && !w.turns().some((t) => t.type === 'ended'); i++) await w.clock.advance(100)
-    await $.session.compact({ trigger: 'manual', messages: [{ role: 'user', text: 'Earlier', toolUses: [] }] } as never)
+    await $.session.compact({ trigger: 'auto', messages: [{ role: 'user', text: 'Earlier', toolUses: [] }] } as never)
     await unstamped(U2)
     await prompt($, P2)  // a real row: the span ends here
     await $.turn.start({ text: 'two', turnId: 't2' })
@@ -1370,6 +1370,34 @@ describe('turn events', () => {
   })
 
 
+  test("a typed command whose output Claude stores as a user row ends there: /model with an argument", async ($, on) => {
+    // Claude Code 2.1.332 stores a typed /model haiku or /effort medium as a caveat, its '<command-name>' row and a user
+    // '<local-command-stdout>' row, one finished command turn to the reader. The mod ended a command only at a system
+    // output row, so this one never ended: core closed it as unknown at the next input (qa-claude's Q-6), and a /clear
+    // right after it waited out the whole hold.
+    const w = world(on)
+    const [C1, N1, O1] = ['c1111111-1111-4111-8111-111111111111', 'c2222222-2222-4222-8222-222222222222', 'c3333333-3333-4333-8333-333333333333']
+    await answer($, R1)
+    await row($, C1, 'command', { kind: 'unclassified' }, { type: 'user', isMeta: true,
+      content: [{ type: 'text', text: '<local-command-caveat>Caveat</local-command-caveat>' }] })
+    await row($, N1, 'command', { kind: 'unclassified' }, { type: 'user',
+      content: [{ type: 'text', text: '<command-name>/model</command-name>\n<command-message>model</command-message>\n<command-args>haiku</command-args>' }] })
+    await row($, O1, 'command', { kind: 'unclassified' }, { type: 'user',
+      content: [{ type: 'text', text: '<local-command-stdout>Set model to Haiku 5.5</local-command-stdout>' }] })
+    w.disk.push(R1, C1, N1, O1)
+    const before = w.clock.now()
+    let held = -1
+    const ending = $.classic.SessionEnd({ reason: 'clear' } as never).then(() => { held = w.clock.now() - before })
+    for (let i = 0; i < 40 && held < 0; i++) await w.clock.advance(50)
+    await ending
+    expect(w.turns().map((t) => [t.type, t.kind, t.turn, t.ref ?? null, t.state ?? null])).toEqual([
+      ['started', 'command', C1, C1, null], ['ended', 'command', C1, O1, 'finished']])
+    expect(held).toBeLessThan(600)
+    await $.classic.SessionStart({ source: 'clear', session_id: 's2' } as never)
+    await w.clock.advance(6000)  // the /clear's own wait for Claude's process file runs out before the test ends
+  })
+
+
   test("two /clears in a row: the second's SessionEnd lets the move to the first one's conversation land, with its edges, before Claude moves on", async ($, on) => {
     // Claude names a /clear's new conversation in its process file only after the hook, and runs two queued /clears
     // about 70 ms apart, so the move to the middle one was overtaken: never recorded, its edges dropped (Shao's 512).
@@ -1480,24 +1508,52 @@ describe('turn events', () => {
   })
 
 
-  test("a caveat a compaction stored inside its span starts no command turn", async ($, on) => {
-    // The reader keeps such a caveat as the compaction's command_output, so the /compact's '<command-name>' row stays
-    // its command turn's first row; a command turn started at the caveat would name a turn the reader doesn't have.
+  test("after an automatic compaction a typed local command opens its turn at its caveat, and the span ends where the reader's does", async ($, on) => {
+    // The reader opens a command at a caveat in a span, and ends the span at a real row or that command's user stdout;
+    // a system output row (2.1.332's /reload-plugins) leaves it. The mod ended it at the caveat, so the next unstamped
+    // user row started a prompt turn the reader counts as the compaction's.
     const w = world(on)
-    const C1 = 'c1111111-1111-4111-8111-111111111111'
-    const C2 = 'c2222222-2222-4222-8222-222222222222'
+    const [C1, N1, O1, C2, N2, O2] = ['c1111111-1111-4111-8111-111111111111', 'c2222222-2222-4222-8222-222222222222',
+      'c3333333-3333-4333-8333-333333333333', 'c4444444-4444-4444-8444-444444444444', 'c5555555-5555-4555-8555-555555555555',
+      'c6666666-6666-4666-8666-666666666666']
+    const [U1, U2, P2] = ['f1111111-1111-4111-8111-111111111111', 'f2222222-2222-4222-8222-222222222222', 'a5555555-5555-4555-8555-555555555555']
+    const compaction = () => $.session.compact({ trigger: 'auto', messages: [{ role: 'user', text: 'Earlier', toolUses: [] }] } as never)
     const caveat = (uuid: string) => row($, uuid, 'command', { kind: 'unclassified' }, { type: 'user', isMeta: true,
       content: [{ type: 'text', text: '<local-command-caveat>Caveat</local-command-caveat>' }] })
-    await answer($, R1)
-    await $.session.compact({ trigger: 'manual', messages: [{ role: 'user', text: 'Earlier', toolUses: [] }] } as never)
-    await caveat(C1)
-    await prompt($, P1)  // a real row: the span ends
-    await $.turn.start({ text: 'go', turnId: 't1' })
-    await caveat(C2)  // outside a span: a local command
-    await row($, 'c3333333-3333-4333-8333-333333333333', 'command', { kind: 'unclassified' }, { type: 'user',
+    const naming = (uuid: string) => row($, uuid, 'command', { kind: 'unclassified' }, { type: 'user',
       content: [{ type: 'text', text: '<command-name>/reload-plugins</command-name>' }] })
+    const unstamped = (uuid: string) => row($, uuid, 'prompt', { kind: 'unclassified' }, { type: 'user' })
+    const starts = () => w.turns().filter((t) => t.type === 'started').map((t) => [t.kind, t.turn])
+    await answer($, R1)
+    // A system output row: the span goes on, so the unstamped row is the compaction's; the stamped prompt ends it.
+    await compaction()
+    await caveat(C1)
+    await naming(N1)
+    await row($, O1, 'command', { kind: 'engine' }, { type: 'system', name: 'local_command',
+      content: [{ type: 'text', text: '<local-command-stdout>Reloaded</local-command-stdout>' }] })
+    w.disk.push(C1, N1, O1)
+    for (let i = 0; i < 30 && !w.turns().some((t) => t.type === 'ended'); i++) await w.clock.advance(100)
+    await unstamped(U1)
+    await prompt($, P2)
+    await $.turn.start({ text: 'go', turnId: 't1' })
     await w.clock.settle()
-    expect(w.turns().filter((t) => t.type === 'started').map((t) => [t.kind, t.turn])).toEqual([['prompt', P1], ['command', C2]])
+    expect(starts()).toEqual([['command', C1], ['prompt', P2]])
+    await done($, 'd2222222-2222-4222-8222-222222222222')
+    await $.turn.complete(complete('t1') as never)
+    w.disk.push(U1, P2, 'd2222222-2222-4222-8222-222222222222')
+    for (let i = 0; i < 30 && !w.turns().some((t) => t.type === 'ended' && t.turn === P2); i++) await w.clock.advance(100)
+    // The command's user stdout row: the span ends there, so the unstamped row after it opens a prompt turn.
+    await compaction()
+    await caveat(C2)
+    await naming(N2)
+    await row($, O2, 'command', { kind: 'unclassified' }, { type: 'user',
+      content: [{ type: 'text', text: '<local-command-stdout>Reloaded</local-command-stdout>' }] })
+    w.disk.push(C2, N2, O2)
+    await unstamped(U2)
+    await $.turn.start({ text: 'go', turnId: 't2' })
+    for (let i = 0; i < 5; i++) await w.clock.advance(100)
+    expect(starts()).toEqual([['command', C1], ['prompt', P2], ['command', C2], ['prompt', U2]])
+    await w.clock.advance(3000)  // the last turn's command end waits out its bound before the test ends
   })
 
 
@@ -1600,13 +1656,49 @@ describe('turn events', () => {
     const [V, N, S] = ['c4444444-4444-4444-8444-444444444444', 'c5555555-5555-4555-8555-555555555555', 'c6666666-6666-4666-8666-666666666666']
     const ours = { kind: 'plugin', name: 'multiverse' }
     await answer($, R1)
-    await $.session.compact({ trigger: 'manual', messages: [{ role: 'user', text: 'Earlier', toolUses: [] }] } as never)
+    await $.session.compact({ trigger: 'auto', messages: [{ role: 'user', text: 'Earlier', toolUses: [] }] } as never)
     await row($, V, 'command', ours, { type: 'user', isMeta: true, content: [{ type: 'text', text: '<local-command-caveat>Caveat</local-command-caveat>' }] })
     await row($, N, 'command', ours, { type: 'user', content: [{ type: 'text', text: '<command-name>/reload-plugins</command-name>' }] })
     await row($, S, 'command', { kind: 'engine' }, { type: 'system', name: 'local_command', content: [{ type: 'text', text: '<local-command-stdout>Reloaded</local-command-stdout>' }] })
     w.disk.push(V, N, S)
     for (let i = 0; i < 30 && !w.turns().some((t) => t.type === 'ended'); i++) await w.clock.advance(100)
     expect(w.turns().map((t) => [t.type, t.kind, t.turn, t.ref])).toEqual([['started', 'command', V, V], ['ended', 'command', V, S]])
+  })
+
+  test("a command typed right after a /compact that worked is a turn of its own", async ($, on) => {
+    // A manual compaction's span ends with its /compact's output, the last row Claude writes for it; a span kept after
+    // it hid the next typed command's caveat, and that command got no events though the reader has its turn.
+    const w = world(on)
+    const typed = (uuid: string) => row($, uuid, 'note', { kind: 'engine' }, { type: 'user', content: [{ type: 'text', text: '/compact' }] })
+    const [X, V, N, S] = ['c1111111-1111-4111-8111-111111111111', 'c4444444-4444-4444-8444-444444444444',
+      'c5555555-5555-4555-8555-555555555555', 'c6666666-6666-4666-8666-666666666666']
+    await answer($, R1)
+    await typed(X)
+    w.disk.push(X)
+    await $.session.compact({ trigger: 'manual', messages: [{ role: 'user', text: 'Earlier', toolUses: [] }] } as never)
+    for (let i = 0; i < 25 && !w.turns().some((t) => t.type === 'ended'); i++) await w.clock.advance(100)
+    await row($, V, 'command', { kind: 'unclassified' }, { type: 'user', isMeta: true, content: [{ type: 'text', text: '<local-command-caveat>Caveat</local-command-caveat>' }] })
+    await row($, N, 'command', { kind: 'unclassified' }, { type: 'user', content: [{ type: 'text', text: '<command-name>/reload-plugins</command-name>' }] })
+    await row($, S, 'command', { kind: 'engine' }, { type: 'system', name: 'local_command', content: [{ type: 'text', text: '<local-command-stdout>Reloaded</local-command-stdout>' }] })
+    w.disk.push(V, N, S)
+    for (let i = 0; i < 30 && w.turns().filter((t) => t.type === 'ended').length < 2; i++) await w.clock.advance(100)
+    expect(w.turns().map((t) => [t.type, t.turn, t.ref, t.state ?? null])).toEqual([
+      ['started', X, X, null], ['ended', X, X, 'finished'], ['started', V, V, null], ['ended', V, S, 'finished']])
+  })
+
+  test("a /compact that worked starts and ends at the caveat Claude stores it under", async ($, on) => {
+    // The reader opens its turn at that caveat, which comes before the /compact row the mod sees; started at the row,
+    // the turn lacked its first row and the caveat was read into an older command turn (qa-claude's Q-4).
+    const w = world(on)
+    const typed = (uuid: string) => row($, uuid, 'note', { kind: 'engine' }, { type: 'user', content: [{ type: 'text', text: '/compact' }] })
+    const [K, X, O] = ['c1111111-1111-4111-8111-111111111111', 'c2222222-2222-4222-8222-222222222222', 'c3333333-3333-4333-8333-333333333333']
+    await answer($, R1)
+    await typed(X)
+    w.disk.push({ type: 'system', uuid: 'b1111111-1111-4111-8111-111111111111' }, { type: 'user', uuid: K, isMeta: true },
+      { type: 'user', uuid: X, parentUuid: K }, { type: 'user', uuid: O, parentUuid: X })
+    await $.session.compact({ trigger: 'manual', messages: [{ role: 'user', text: 'Earlier', toolUses: [] }] } as never)
+    for (let i = 0; i < 30 && !w.turns().some((t) => t.type === 'ended'); i++) await w.clock.advance(100)
+    expect(w.turns().map((t) => [t.type, t.turn, t.ref, t.state ?? null])).toEqual([['started', K, K, null], ['ended', K, O, 'finished']])
   })
 
   test("a turn an automatic compaction cuts mid-turn ends at its last row after the boundary, and a join after it names the turn", async ($, on) => {

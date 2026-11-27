@@ -1871,10 +1871,12 @@ Turn events go the same way (`--turn-events-json`), from the rows Claude stores
 (`session.append`, with each row's id) and its turn hooks, grouped as the transcript
 reader groups rows. A user row with an origin opens a prompt turn; so does one with
 none that is neither meta, nor marked as a command, its output, a `/compact` or an
-interruption, nor in a compaction's span (from a manual or automatic compaction's
-`session.compact` returning, until the next stamped row, reply or tool result, which is
-itself counted outside it), as the reader counts it; a compaction that fails or has nothing to compact stores no boundary,
-so it opens no span. The reader also
+interruption, nor in an automatic compaction's span (from its `session.compact`
+returning, until the next stamped row, reply or tool result, which is itself counted
+outside it, or the user stdout row of a command a caveat opened in the span), as the
+reader counts it; a manual compaction's span ends with its
+`/compact`'s output, which Claude writes before `session.compact` returns, and a
+compaction that fails or has nothing to compact stores no boundary, so neither leaves one. The reader also
 wants such a row's `promptId` to be new, which an append doesn't show; on Claude
 Code 2.1.332 the only rows with no origin that reach it as a prompt or a command are a
 typed local command's, and a native compaction's own rows never reach it. A prompt row
@@ -1911,25 +1913,28 @@ output (a `/model` with none) holds no later switch; a command's end waiting for
 since none comes, and a move into the old conversation still pending is recorded first, so the
 middle conversation of two quick `/clear`s is recorded too. A `queued_command` row
 in a running turn is a join. A local command's row opens a command turn, and its
-output row ends it; where Claude stores the command as user rows (a caveat, its
+output row ends it, a system row or, for `/model` or `/effort` typed with an argument on
+2.1.332, a user `<local-command-stdout>` row; where Claude stores the command as user rows (a caveat, its
 `<command-name>` row, then its output, as Claude Code 2.1.332 does for
 `/reload-plugins`, typed or run by mv2), the caveat opens it, and its start takes its
 place at once and goes once the row after it says how: the `<command-name>` row
 names the command and, for one mv2 ran, the run, and any other row leaves the
-caveat's own source; a caveat inside a compaction's span starts nothing, as the reader
-keeps it the compaction's command output. The output row ends it, or the note it stores for the model right after its output
+caveat's own source; a caveat inside an automatic compaction's span opens its command too, as
+the reader counts it, and the span goes on, as the reader's does: a system output row (2.1.332's
+`/reload-plugins`) leaves it, and only that command's user stdout row or a real row ends it. The output row ends it, or the note it stores for the model right after its output
 (`/context`'s report), which the reader groups with it: the command's end waits for
 the next row in its conversation to say which; Claude raises no turn hooks for
 those. A `/compact`'s own row (typed, a note from
 Claude's engine; run by mv2, a prompt mv2's plugin submitted), which the file later holds
 as its `<command-name>` row under the same id, starts its command turn, and the turn ends,
-finished and naming that row, when the manual compaction's `session.compact` returns: no row
-after it reaches the mod. Its start waits for the compaction too, since Claude writes its row
-to the file only then. A compaction that fails ends it as an error, or interrupted when Esc
-aborted its request. Claude then stores the `/compact` as a local command's rows, with no
-boundary: its caveat, its row, its output; the caveat opens its turn in the file, so the
-start waits until the file holds its row, and then the start and end name the caveat, its
-parent, and the end its output. One that never comes (Claude raises no `session.compact` for "No messages
+finished, when the manual compaction's `session.compact` returns: no row after it reaches
+the mod. Claude stores that row under its caveat, the row's parent, whether the compaction
+worked (inside its span) or failed (as a local command's rows, with no boundary), and the
+caveat opens its turn in the file; so the start waits until the file holds its row, then
+the start and end name the caveat and the end the output under the row. Where the row has
+no caveat as its parent (Claude Code 2.1.288 to 2.1.318 stored the typed row before the
+boundary), they name the row. A compaction that fails ends it as an error, or interrupted
+when Esc aborted its request. One that never comes (Claude raises no `session.compact` for "No messages
 to compact") lets its start go at the next command, `turn.start` or `/clear`, and leaves its end
 to core. A command's report for the model is a meta note: a typed `/compact` right after a
 local command's output is a note too, but not that command's report. The source is the

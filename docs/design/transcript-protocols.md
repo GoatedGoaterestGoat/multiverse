@@ -126,9 +126,17 @@ Claude's rules, checked on rows written by Claude Code 2.1.286 to 2.1.310:
   `/clear`'s caveat with no `promptId`) is its `command_output`, which still
   names it, so a typed command and one mv2 runs are each one command turn. A
   `<command-name>` row with no caveat before it, such as a skill's, keeps its
-  own label. A caveat a compaction stored inside its span keeps
-  `command_output`, so a `/compact`'s `<command-name>` row stays its command
-  turn's first row, the one the in-session part sees.
+  own label. The same holds inside a compaction's span, where Claude stores a
+  `/compact`'s own caveat, `<command-name>` row and output last, so the caveat
+  opens the `/compact`'s turn there too. Claude Code 2.1.288 to 2.1.318 store
+  the typed `/compact` row before the boundary, and its caveat,
+  `<command-name>` row and output in the span under that row's `promptId`:
+  there they are that row's `command_output`, so the `/compact` stays one
+  turn, and only a caveat with no command before it under its `promptId` opens
+  one. Any other command or output row in the span, one that belongs to
+  neither, is `compaction`, part of what the compaction installed, so a
+  command copied into a compacted conversation is never read back as one of
+  its turns.
 - A skill's instructions are a user row with `isMeta`, `turnCompanion` and
   `sourceToolUseID`: `injected`, with `call_id` naming the tool call.
 - Claude's interruption row ("[Request interrupted by user…") is `injected`
@@ -136,7 +144,9 @@ Claude's rules, checked on rows written by Claude Code 2.1.286 to 2.1.310:
 - `compaction` covers the `compact_boundary` row, Claude's summary
   (`isCompactSummary`), and the rows after a boundary up to the first
   assistant row with nonzero usage, user row with `origin`, or `tool_result`
-  row with `toolUseResult`. That finds the rows a `session.compact` hook
+  row with `toolUseResult`; a manual compaction's span also ends after its
+  `/compact`'s own output, the last row Claude writes for it, so a command
+  typed next is outside it. That finds the rows a `session.compact` hook
   installed, which carry no field of their own, without knowing the plugin
   that wrote them.
 

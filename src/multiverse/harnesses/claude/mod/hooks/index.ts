@@ -1259,9 +1259,10 @@ export const register: Register = (on) => {
     let state = "finished"
     try {
       const result = await next(e)
-      // Only a compaction that happened stored a span (from its boundary): one with nothing to compact, or that
-      // failed, stores its rows as a local command's, and the next command's caveat must open its turn.
-      turnsCompacted()
+      // Only an automatic compaction that happened leaves a span after it: a manual one's ends with its /compact's
+      // output, which Claude writes before this returns, and one with nothing to compact, or that failed, stores
+      // none. Otherwise the next command's caveat would open no turn.
+      if (e.trigger !== "manual") turnsCompacted()
       return result
     } catch (error) {
       // Esc during the compaction aborts its request ("API Error: Request was aborted."); anything else failed it.
