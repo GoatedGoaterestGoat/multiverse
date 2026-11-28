@@ -93,8 +93,9 @@ which confirm deliveries, read every copy and check that copies agree.
 
 ## Labels
 
-The adapter labels every row. That is all the harness knowledge turns need:
-which rows are real prompts.
+The adapter labels every row, and gives a row that names a command its
+`command` and `args`, whatever its label. That is all the harness knowledge
+turns need: which rows are real prompts.
 
 | Label | Means |
 | --- | --- |
@@ -102,7 +103,7 @@ which rows are real prompts.
 | `mid_turn` | Joins the running turn: a steer, or a prompt typed while the model works |
 | `tool_result` | A tool's result |
 | `command` | Starts a slash command; core makes it a turn of its own |
-| `command_output` | That command's echo, caveat or output, and the note a local command stores for the model under its output (`/context`'s report, `/rename`'s) |
+| `command_output` | That command's echo or output, and the note a local command stores for the model under its output (`/context`'s report, `/rename`'s) |
 | `injected` | Context the harness added: reminders, file and environment notes, a background notice merged mid-turn, a skill's instructions |
 | `compaction` | Written by a compaction: the boundary, a summary, rows it stored |
 | `response` | The model's output |
@@ -111,12 +112,31 @@ which rows are real prompts.
 Claude's rules, checked on rows written by Claude Code 2.1.286 to 2.1.310:
 
 - A `prompt` is a user row with `origin`, which only rows that start a turn
-  have. `source` is `origin.kind`. Rows from versions without `origin` fall
-  back to a new `promptId` with text or image content.
+  have, except a command's caveat and echo (below), which a command mv2 runs
+  has stamped too. `source` is `origin.kind`. Rows from versions without
+  `origin` fall back to a new `promptId` with text or image content.
 - A `mid_turn` message is a `queued_command` attachment with `commandMode`
   `prompt`. With `commandMode` `task-notification` it is `injected`.
-- A `command` is a typed slash command (a new `promptId`, no `origin`), or
-  the `<command-name>` or `system/local_command` row that starts one.
+- A `command` is a typed slash command (a new `promptId`, no `origin`), or the
+  `<command-name>` or `system/local_command` row that starts one. Where Claude
+  stores a local command as user rows, its first row is a meta caveat
+  (`<local-command-caveat>`): that row is the `command`, whatever its
+  `origin`, and the `<command-name>` row after it that belongs to it (the same
+  `promptId`, or the caveat as its parent, since Claude Code 2.1.332 stores
+  `/clear`'s caveat with no `promptId`) is its `command_output`, which still
+  names it, so a typed command and one mv2 runs are each one command turn. A
+  `<command-name>` row with no caveat before it, such as a skill's, keeps its
+  own label. The same holds inside a compaction's span, where Claude stores a
+  `/compact`'s own caveat, `<command-name>` row and output last, so the caveat
+  opens the `/compact`'s turn there too. Claude Code 2.1.288 to 2.1.318 store
+  the typed `/compact` row before the boundary, and its caveat,
+  `<command-name>` row and output in the span under that row's `promptId`:
+  there they are that row's `command_output`, so the `/compact` stays one
+  turn, and only a caveat with no command before it under its `promptId` opens
+  one. Any other command or output row in the span, one that belongs to
+  neither, is `compaction`, part of what the compaction installed, so a
+  command copied into a compacted conversation is never read back as one of
+  its turns.
 - A skill's instructions are a user row with `isMeta`, `turnCompanion` and
   `sourceToolUseID`: `injected`, with `call_id` naming the tool call.
 - Claude's interruption row ("[Request interrupted by user…") is `injected`
@@ -124,7 +144,9 @@ Claude's rules, checked on rows written by Claude Code 2.1.286 to 2.1.310:
 - `compaction` covers the `compact_boundary` row, Claude's summary
   (`isCompactSummary`), and the rows after a boundary up to the first
   assistant row with nonzero usage, user row with `origin`, or `tool_result`
-  row with `toolUseResult`. That finds the rows a `session.compact` hook
+  row with `toolUseResult`; a manual compaction's span also ends after its
+  `/compact`'s own output, the last row Claude writes for it, so a command
+  typed next is outside it. That finds the rows a `session.compact` hook
   installed, which carry no field of their own, without knowing the plugin
   that wrote them.
 
@@ -232,6 +254,10 @@ turns.
 - A `command` row starts a command turn, which holds its `command_output`
   rows and the `compaction` rows written while it is the latest turn (so a
   typed `/compact` holds its compaction).
+- A command turn's `command`, `args` and `preview` come from its first row
+  that names a command. A caveat can start the turn before that row. When no
+  row names one, `command` and `args` are `None` and the preview is its first
+  row's.
 - Every other row joins the current prompt turn.
 - Rows before the first turn form the `preamble` turn.
 
@@ -247,7 +273,9 @@ plugin slices one history read by turn instead of reading turn by turn.
   turn-end row of its own, timed at or after its prompt. A command turn run
   meanwhile doesn't finish it. A turn-end row without a usable time leaves
   "finished" unknown.
-- A command turn is finished once its output is stored.
+- A command turn is finished once a `command_output` row is stored after the
+  last row that names its command (any `command_output` row when none names
+  one), so a command's echo alone doesn't finish it.
 - Claude's turn-end rows are `system/turn_duration` and its interruption row
   ("[Request interrupted by user…"). An interrupted turn usually writes no
   `turn_duration`.
@@ -272,19 +300,27 @@ rows through this protocol, with `transcripts.read`.
   a skill a harness stores as a prompt is a `prompt` turn. `ref` and
   `generation` are the row's cursor: the input's row for a start or join, the
   turn's last stored row for an end, its own turn-end row included where the
-  harness has stored one. `resolved` is true when mv2 proved all three; false
+  harness has stored one, or the last row the harness's in-session part saw
+  where it can't see that one (a compaction writes a `/compact`'s output
+  straight to the file). `resolved` is true when mv2 proved all three; false
   when it couldn't, and then they are null. An unresolved event is published
   anyway, in its place, never dropped; a plugin pairs a null-turn start and
-  end by order, since a conversation runs one turn at a time.
+  end by order, since a conversation runs one turn at a time. A compaction run
+  mid-turn can cut the running turn's opening row out of the history, which
+  then starts at the compaction's summary, so the rest of that turn is the new
+  history's preamble. A join or end of that turn still names the turn its
+  start named, and its `ref` and `generation` name its row in the new history,
+  so a plugin matches it to the start it saw and reads the reply from there.
 - `source` is `person` (typed in the terminal), `mv2` (an input mv2 delivered:
   a message, including the one a wake starts the resumed session with, a
   plugin's send, an answer, a command run with `mv2 slash`, the launch's task)
   or `harness` (anything else). `message` is the mv2 message ID for a message,
   from which a plugin reads its sender, and null otherwise; mv2 matches the
-  delivery from its own records and never adds the ID to the row or anything
-  the agent sees. `first_task` marks the start of the turn that ran the
-  launch's task, when the harness proves that input was the task; a wake's
-  message is not a task.
+  delivery from its own records, including one the harness took in after
+  moving to a later conversation of the same launch (a `/clear` typed while it
+  was queued), and never adds the ID to the row or anything the agent sees.
+  `first_task` marks the start of the turn that ran the launch's task, when
+  the harness proves that input was the task; a wake's message is not a task.
 - `state` is `finished`, `interrupted`, `error` (a model or harness error
   ended it, where the harness records one) or `unknown` (the harness can't
   tell, or mv2 closed the turn because its end was never reported). A plugin
@@ -297,13 +333,33 @@ can see the end by then. A harness may continue a turn on its own after it
 ended, with no new input; the turn then ends again with a later `ref`, and the
 latest end wins.
 
+**Inputs taken in together.** A harness can take several stored inputs in at
+once, such as ones queued behind a turn. Each is still named as the turns
+above group its row, and none is merged into another: an input whose row opens
+a turn gets its own `turn.started`, with its own `ref` and, for an mv2
+message, its own `message`, and one whose row joins a turn gets `turn.joined`.
+A turn that the next input's turn follows before any reply of its own ends
+`finished`, since a later prompt turn is stored, with `ref` its last stored
+row, usually its input's own. It holds no reply, so its `finished` doesn't
+mean its input was answered: the reply to them all is in the last one's turn,
+whose end says how it went. The harness reports these edges when it takes the
+inputs in, in the order their rows were stored: each such turn's start and end
+come before the next input's start, and all of them before the last turn's end
+and the `idle` after it; against `working` they are like any start. Core keeps
+each start's own message and never matches one input's delivery to another's.
+An end the harness doesn't report is still recorded as `unknown` by the next
+start, as for any missed end.
+
 **Missed ends.** A new turn whose predecessor's end was never reported records
 that end as `unknown` first. A launch's end, a crash noticed later, or a
 conversation switch ends an open turn as `unknown` before `agent.exited`,
-`agent.killed`, the next `agent.launched` or `agent.session`. An end or a join
-whose turn's start mv2 never saw (the in-session part reloaded mid-turn) is
-recorded alone. After a gap the journal no longer holds, a plugin reads the
-turns once.
+`agent.killed`, the next `agent.launched` or `agent.session`. A harness
+reports every edge of a conversation, an input stored there and never taken in
+included, before it records the switch away from it: core takes edges only for
+the agent's recorded conversation, so one reported after the switch is lost,
+and a lost start has nothing to stand in for it. An end or a join whose turn's
+start mv2 never saw (the in-session part reloaded mid-turn) is recorded alone.
+After a gap the journal no longer holds, a plugin reads the turns once.
 
 **How it's kept.** A status report never reads a transcript: the harness's
 report of each edge, with its native row and turn, is staged with the status
@@ -502,6 +558,7 @@ CLAUDE -p --resume RUN_ID --no-session-persistence --tools ''
   but reads no OAuth login. The model gets no tools. A real 2.1.312 run read no
   CLAUDE.md from its own folder even without the switch, which stays for the
   user's `~/.claude/CLAUDE.md`.
+- **Cleanup.** The supervisor creates and records a private `.claude/` in the run's working directory. Once the run's process group has stopped, it removes that directory and its contents after checking its recorded identity. The session file in the selected Claude store is tracked separately.
 - **Rows** (passthrough) get the run's session ID, folder and a linear parent
   chain; `isSidechain`, `logicalParentUuid` and `agentId` are dropped, and
   recorded usage is cleared, since Claude sizes a resumed session from the last

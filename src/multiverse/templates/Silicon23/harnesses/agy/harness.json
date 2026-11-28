@@ -6,7 +6,7 @@
     "args": [
       "--dangerously-skip-permissions"
     ],
-    "model": "gemini-4-neon",
+    "model": "gemini-4-hydrogen",
     "models": {
       "gemini-4-neon": {},
       "gemini-4-carbon": {},

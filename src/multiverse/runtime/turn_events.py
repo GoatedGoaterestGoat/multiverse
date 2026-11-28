@@ -1,12 +1,12 @@
 """Validate and order metadata-only native turn edges for the event outbox."""
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 import json
 import re
 import time
 
 from ..harnesses.types import TurnEnded, TurnJoined, TurnStarted
-from ..universe import mailbox, records
+from ..universe import mailbox, records, sessions
 
 
 _IDENTITY = re.compile(r'[A-Za-z0-9_.:-]{1,256}')
@@ -70,9 +70,13 @@ def parse(value):
         raise ValueError('Invalid turn-event metadata') from None
 
 
+def _resolved(data):
+    return all(isinstance(data.get(key), str) and data[key] for key in ('turn', 'ref', 'generation'))
+
+
 def public(data):
     """Expose a cursor only when all its public references were proved."""
-    if all(isinstance(data.get(key), str) and data[key] for key in ('turn', 'ref', 'generation')):
+    if _resolved(data):
         return {**data, 'resolved': True}
     return {**data, 'turn': None, 'ref': None, 'generation': None, 'resolved': False}
 
@@ -109,6 +113,10 @@ def _prompt_start(edge):
     return isinstance(edge, TurnStarted) and edge.kind == 'prompt'
 
 
+def _prompt_row(edge):
+    return edge.ref is not None and (isinstance(edge, TurnJoined) or _prompt_start(edge))
+
+
 def _wake_request(directory, session, generation):
     from . import launch_files
 
@@ -128,15 +136,33 @@ def _wake_request(directory, session, generation):
     return None
 
 
+def _predecessors(directory, session):
+    """Previous conversations reached through this launch's recorded binding changes."""
+    try:
+        rows = sessions.journal(directory)
+    except (OSError, ValueError, RecursionError):
+        return set()
+    earlier = set()
+    for row in reversed(rows):
+        if not earlier and (row['to'], row['launch']) != (session.native_id, session.launch_id):
+            continue
+        if (row['schema'] != 1 or row['launch'] != session.launch_id
+                or row['harness'] != session.harness or row['home'] != session.home):
+            break
+        earlier.add(row['from'])
+    return earlier
+
+
 def attribution(directory, session, generation, edges, *, deadline):
     """Join an adapter-observed attempt to exactly one recorded message or private input."""
     from . import delivery_observations, queued_prompts
 
     wires = {edge.attempt for edge in edges if isinstance(edge, (TurnStarted, TurnJoined)) and edge.attempt}
     starts = [edge for edge in edges if _prompt_start(edge)]
+    prompt_wires = {edge.attempt for edge in edges if _prompt_row(edge)}
     if not wires and not any(edge.first_task for edge in starts):
         return {}
-    by_wire = {}
+    by_wire, carried_by_wire = {}, {}
     while True:
         try:
             snapshot = (mailbox.delivery_observation_snapshot(directory)
@@ -164,15 +190,29 @@ def attribution(directory, session, generation, edges, *, deadline):
                 or attempts[0].get('native_message_id') is not None
                 or attempts[0].get('state') not in ('ok', 'unknown')):
             wake = None
+    earlier = None
     for logical, state in snapshot.items():
         attempts = state.get('attempts', [])
         owner = queued_prompts._context_owner(state, attempts, logical)
         for attempt in attempts:
             wire = attempt.get('native_message_id', logical)
-            if (isinstance(wire, str) and wire in wires and attempt.get('native_session_id') == session.native_id
-                    and attempt.get('mode') in ('follow-up', 'steer')
-                    and delivery_observations._scoped(attempt, state, session, wire, logical, owner)):
-                by_wire.setdefault(wire, []).append((logical, attempt))
+            target = attempt.get('native_session_id')
+            if not isinstance(wire, str) or wire not in wires or attempt.get('mode') not in ('follow-up', 'steer'):
+                continue
+            if target == session.native_id:
+                if delivery_observations._scoped(attempt, state, session, wire, logical, owner):
+                    by_wire.setdefault(wire, []).append((logical, attempt))
+                continue
+            # The adapter observed this exact attempt in an input row after a same-launch switch.
+            if (wire not in prompt_wires or wire == logical or not isinstance(target, str)
+                    or attempt.get('agent_id') != session.agent_id or attempt.get('launch_id') != session.launch_id
+                    or not isinstance(attempt.get('delivery_context'), dict)):
+                continue
+            if earlier is None:
+                earlier = _predecessors(directory, session)
+            if target in earlier and delivery_observations._scoped(
+                    attempt, state, replace(session, native_id=target), wire, logical, owner):
+                carried_by_wire.setdefault(wire, []).append((logical, attempt))
 
     private_wires = {wire for wire in wires if _private_attempt(directory, session, generation, wire)}
     resolved = {}
@@ -181,6 +221,8 @@ def attribution(directory, session, generation, edges, *, deadline):
             continue
         wire = edge.attempt
         matches = by_wire.get(wire, ())
+        if _prompt_row(edge) and wire in carried_by_wire:
+            matches = [*matches, *carried_by_wire[wire]]
         if wire in private_wires and not matches:
             resolved[index] = Attribution()
         elif len(matches) == 1 and wire not in private_wires:
@@ -222,6 +264,9 @@ def reduce(turns, edge, reference, *, message=None, mv2=False, task_launch=False
     recent = turns.get('recent', {})
     same = active is not None and active['identity'] == edge.turn
     data = {'turn': reference.turn, 'ref': reference.ref, 'generation': reference.generation}
+    if reference.turn is None and reference.ref is not None and not isinstance(edge, TurnStarted):
+        # Compaction can leave the row on the history but move the opening out of it.
+        data['turn'] = turns.get('starts', {}).get(edge.turn)
     if isinstance(edge, TurnEnded):
         end = [edge.ref, edge.state]
         if end in recent.get(edge.turn, ()):
@@ -249,6 +294,12 @@ def reduce(turns, edge, reference, *, message=None, mv2=False, task_launch=False
     preceding = close_active(turns)
     kind = reference.kind or edge.kind
     turns['active'] = {'identity': edge.turn, 'turn': reference.turn, 'kind': kind}
+    # The outbox commits this proof with the start and clears it at launch or conversation boundaries.
+    if _resolved(data):
+        starts = turns.setdefault('starts', {})
+        starts[edge.turn] = reference.turn
+        if len(starts) > _RECENT_LIMIT:
+            del starts[next(iter(starts))]
     first_task = task_launch and edge.first_task and not turns.get('task_seen', False)
     if first_task or (wake and mv2):
         turns['task_seen'] = True

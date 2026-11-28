@@ -10,17 +10,16 @@
 // published file: "sent" (mv2's answer went to Claude, whose stored rows say whether it took), "refused" (left to
 // the person) or "closed" with the cause. An answer for a prompt no hook holds any more is never read.
 import type { EngineInterface } from 'claude-code'
+import { PRUNE_EVERY, prune, remove } from './prune'
 
 export const FOLDER = 'claude-prompts'
 const SCHEMA = 1
 // A wait looks for the answer and the prompt's own file every 0.2 s for a minute; the hook then looks again.
 const WAITER = 'i=0; while [ $i -lt 300 ]; do [ -f "$1" ] && exit 0; [ -f "$2" ] || exit 2; sleep 0.2; i=$((i+1)); done; exit 1'
 const DETAIL_LIMIT = 65536
-// End records answer outcomes, a late answer's "already answered" included: the newest few dozen are kept, and
-// older ones go once they are a day old (core keeps its own record of every outcome it settled).
-const KEEP_ENDS = 48
-const KEEP_MS = 24 * 3600 * 1000
-const PRUNE_EVERY = 16
+// End records answer outcomes, a late answer's "already answered" included: they are kept as prune.ts keeps the
+// mod's records (core keeps its own record of every outcome it settled).
+const END_RECORD = /^[0-9a-f-]{36}\.end\.json$/
 const ANSWER_LIMIT = 1048576
 // A suggestion with one of these destinations also changes the person's saved settings: a person's answer only.
 const SAVED = new Set(['userSettings', 'projectSettings', 'localSettings'])
@@ -189,10 +188,6 @@ async function now($: EngineInterface): Promise<string> {
   return new Date(await $.clock.now()).toISOString()
 }
 
-async function remove($: EngineInterface, paths: string[]) {
-  try { await $.process.run(['rm', '-f', ...paths], { timeoutMs: 10000 }) } catch { /* the next session start removes it */ }
-}
-
 // End a prompt once: its end record first, then its files, so a reader never finds neither.
 function end($: EngineInterface, prompt: Open, record: Record<string, unknown>): Promise<void> {
   if (prompt.ended !== undefined) return prompt.ended
@@ -211,19 +206,12 @@ function end($: EngineInterface, prompt: Open, record: Record<string, unknown>):
     } catch { /* the prompt's own file still goes: its absence is the end */ }
     await remove($, [`${base}.json`])
     endsSincePrune += 1
-    if (endsSincePrune >= PRUNE_EVERY) await prune($, prompt.folder)
+    if (endsSincePrune >= PRUNE_EVERY) {
+      endsSincePrune = 0
+      await prune($, prompt.folder, END_RECORD)
+    }
   })()
   return prompt.ended
-}
-
-async function prune($: EngineInterface, folder: string) {
-  endsSincePrune = 0
-  let entries
-  try { entries = await $.fs.list(folder) } catch { return }
-  const ends = entries.filter((entry) => /^[0-9a-f-]{36}\.end\.json$/.test(entry.name)).sort((a, b) => b.mtimeMs - a.mtimeMs)
-  const current = await $.clock.now()
-  const old = ends.slice(KEEP_ENDS).filter((entry) => current - entry.mtimeMs > KEEP_MS)
-  if (old.length > 0) await remove($, old.map((entry) => `${folder}/${entry.name}`))
 }
 
 // Calls and turns that ended close the prompts that belonged to them.
@@ -439,5 +427,6 @@ export async function sweep($: EngineInterface) {
     }
     await remove($, [`${folder}/${id}.json`])
   }
-  await prune($, folder)
+  endsSincePrune = 0
+  await prune($, folder, END_RECORD)
 }

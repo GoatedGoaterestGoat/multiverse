@@ -116,7 +116,8 @@ class BaseTemplateTest(unittest.TestCase):
                    "agy": ({"gemini-4-neon", "gemini-4-carbon", "gemini-4-argon", "gemini-4-hydrogen", "gemini-3.8-flash"}, (), "gpt-oss-120b")}
         for template in ("base", "Silicon23"):
             root = templates.create(self.work / template, template, template, self.work)
-            for harness, default in (("claude", "claude-opus-5-5"), ("codex", "gpt-6.2-sol"), ("agy", "gemini-4-neon")):
+            agy_default = "gemini-4-neon" if template == "base" else "gemini-4-hydrogen"
+            for harness, default in (("claude", "claude-opus-5-5"), ("codex", "gpt-6.2-sol"), ("agy", agy_default)):
                 with self.subTest(f"{template} {harness}"):
                     adapter = harnesses.load(root, harness)
                     self.assertEqual(adapter.default_model, default)

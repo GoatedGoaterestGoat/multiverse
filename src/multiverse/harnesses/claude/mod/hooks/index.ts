@@ -4,15 +4,19 @@ import { DESCRIPTION, HINT, NAME, registerMultiverse } from './multiverse'
 import { INBOX_LIMIT, currentLine, defaultConfig, isSubverse, parseConfig, parseItems, render, setBase } from './statusline'
 import type { Config, Facts, PluginItem } from './statusline'
 import { pythonEnv } from './python'
+import { PRUNE_EVERY, prune } from './prune'
 import { retryMissing } from './records'
 import { registerUsage } from './usage'
-import { closeAll, closeKeys, form, hold as holdPrompt, sweep, transitions } from './prompts'
+import { type Transition, closeAll, closeKeys, form, hold as holdPrompt, sweep, transitions } from './prompts'
 import { type DiskRecord, type Ending, type Ticket, type TurnTransition, abandon as turnAbandon, admit as turnAdmit,
   batch as turnBatch, cleared as turnsCleared, take as turnTake,
   active as turnActive, ended as turnEnded, ending as turnEnding, latest as turnLatest, loaded as turnsLoaded, proving as turnProving,
   release as turnRelease, reserve as turnPlace, started as turnStarted, stepped as turnStepped, limit as turnLimit,
-  storing as turnStoring, stored as turnRow, turnTransitions } from './turns'
+  storing as turnStoring, stored as turnRow, arrived as turnArrived, onArrival as turnOnArrival, lastRow as turnLastRow,
+  compacted as turnsCompacted, edgesFor as turnEdgesFor, compactEnded as turnCompactEnded, storedUnder as turnStoredUnder,
+  turnTransitions } from './turns'
 import { publishQueue, reloaded } from './queue'
+import { leaving as turnLeaving, openCommand as turnOpenCommand } from './turns'
 import type { QueueView } from './queue'
 import { dialogIn, watch } from './dialog'
 
@@ -305,8 +309,19 @@ async function rowsOnDisk($: EngineInterface, path: string, timeoutMs: number): 
 // and no next row is awaited; a /clear ends the wait, since the new conversation's file can't hold them.
 // `downstream`: for a turn.complete, Claude's own part of that hook. Until it returns, rows Claude stores for the turn
 // may still come, so the proof can't end early; the bound and the backstop hold as ever.
-async function finishTurn($: EngineInterface, end: Ending, downstream?: Promise<unknown>) {
-  const place = turnPlace(end)  // before any wait: later edges queue behind it
+// `reserved`: a place the end took already (a turn that Claude took in with later ones), so nothing queued since goes
+// before it.
+// A conversation's transcript, beside the current one: the same folder, named after its session, as Claude names
+// each one (2.1.332 at startup, after /clear and after /resume). Never the current path as it stands: during a switch
+// Claude names the new conversation's file before the mod's own session id moves. A path with no folder: none.
+function transcriptOf(current: string | undefined, session: string | undefined) {
+  if (current === undefined || session === undefined) return current
+  const folder = current.lastIndexOf("/")
+  return folder < 0 ? undefined : `${current.slice(0, folder + 1)}${session}.jsonl`
+}
+
+async function finishTurn($: EngineInterface, end: Ending, downstream?: Promise<unknown>, reserved?: { place: TurnTransition | undefined }) {
+  const place = reserved !== undefined ? reserved.place : turnPlace(end)  // before any wait: later edges queue behind it
   const owner = end.owner
   let ref: string | null = null  // the latest of its rows any read found whole in the file
   let done = false
@@ -318,7 +333,9 @@ async function finishTurn($: EngineInterface, end: Ending, downstream?: Promise<
     done = true
     turnProving(owner, false)
     turnAbandon(end)  // a join of its step still being stored gives up its place
-    turnEnded(place, end, ref)
+    turnStoredUnder(end, undefined)  // a failed /compact's start goes before its end, whatever the file showed
+    // With no row proved, an end whose conversation has moved on names its last noted row, the best proof left.
+    turnEnded(place, end, ref ?? (end.unread === true || sessionId !== end.session ? turnLastRow(owner) : null))
     void report($)
   }
   // The bound starts before anything is looked up. The reads below keep to it; this backstop, one pause later, ends
@@ -327,19 +344,20 @@ async function finishTurn($: EngineInterface, end: Ending, downstream?: Promise<
   turnProving(owner, true)
   try {
     const deadline = (await $.clock.now()) + TURN_ROWS_WAIT_MS
-    const path = (await $.session.info()).transcriptPath
+    // Its own conversation's file: Claude names each after its session and keeps the old one after a /clear, so an
+    // end a /clear overtakes is still proved there.
+    const path = transcriptOf((await $.session.info()).transcriptPath, end.session)
     while (!done && path) {
       const left = deadline - await $.clock.now()
       if (left <= 0) break
-      if (sessionId === end.session) {
+      if (end.session !== undefined || sessionId === end.session) {
         const disk = await rowsOnDisk($, path, Math.min(TURN_ROWS_READ_MS, left))
         if (done) break
-        if (sessionId === end.session) {
-          const found = turnLatest(owner, disk, turnLimit(end))
-          ref = found.ref ?? ref
-          if (found.complete && !turnStoring(end) && released) break
-        }
-      } else if (!turnStoring(end) && released) break  // after a /clear the old file is no longer read; its rows still arriving are waited for
+        turnStoredUnder(end, disk)
+        const found = turnLatest(owner, disk, turnLimit(end))
+        ref = found.ref ?? ref
+        if (found.complete && !turnStoring(end) && released) break
+      } else if (!turnStoring(end) && released) break  // a conversation never known has no file of its own to read
       const after = deadline - await $.clock.now()
       if (after <= 0) break
       // A row arriving for it, the next row deciding, a /clear or Claude's part returning wakes it at once; otherwise the
@@ -354,6 +372,23 @@ async function finishTurn($: EngineInterface, end: Ending, downstream?: Promise<
   // ends it at the bound if that never comes.
   if (!done && !released) await settled
   finish()
+}
+
+// Until every opener row admitted up to `boundary` is noted, or the bound passes: a row still being stored when its
+// turn.start comes would otherwise lose its turn.
+async function openersNoted($: EngineInterface, boundary: number) {
+  try {
+    const deadline = (await $.clock.now()) + TURN_ROWS_WAIT_MS
+    while (!turnArrived(boundary)) {
+      const left = deadline - await $.clock.now()
+      if (left <= 0) return
+      const pause = $.clock.sleep(Math.min(TURN_ROWS_POLL_MS, left))
+      pause.catch(() => {})  // left running when a row's arrival beats it: it must not reject unheard
+      await Promise.race([pause, new Promise<void>((resolve) => { turnOnArrival(resolve) })])
+    }
+  } catch { /* the session is going: nothing more to wait for */ } finally {
+    turnOnArrival(undefined)
+  }
 }
 
 // Report the current status once it changes, one report at a time, so a
@@ -378,15 +413,17 @@ async function report($: EngineInterface) {
     let python
     try { python = await $.env.get("MV2_PYTHON") } catch { return }
     if (!python) return
-    while (!registered || reported !== status() || transitions.length > 0 || turnBatch(1).length > 0) {
+    // While a conversation switch's move isn't recorded, the new conversation's edges wait: core drops a batch for a
+    // conversation other than the one it has recorded. Another conversation's still go (an old one's must, before
+    // the move), as the turn edges do.
+    while (!registered || reported !== status() || promptBatch().length > 0 || turnBatch(1, moving).length > 0) {
       const argv = [python, "-m", "multiverse.tools.runtime_update", "--status", ""]
-      const session = transitions[0]?.session
-      let batch = 0
-      while (batch < transitions.length && batch < TRANSITIONS && transitions[batch]?.session === session) batch += 1
+      const batch = promptBatch()
+      const session = batch[0]?.session
       if (session !== undefined) {
-        argv.push("--prompt-events-json", JSON.stringify(transitions.slice(0, batch).map((t) => t.event)), "--prompt-session-id", session)
+        argv.push("--prompt-events-json", JSON.stringify(batch.map((t) => t.event)), "--prompt-session-id", session)
       }
-      const edges = turnBatch(TRANSITIONS)
+      const edges = turnBatch(TRANSITIONS, moving)
       const turnSession = edges[0]?.session
       if (turnSession !== undefined) {
         argv.push("--turn-events-json", JSON.stringify(edges.map((t) => t.event)), "--turn-session-id", turnSession)
@@ -412,7 +449,7 @@ async function report($: EngineInterface) {
         failed(batch, edges)
         return
       }
-      transitions.splice(0, batch)
+      takeTransitions(batch)
       turnTake(edges)
       transitionFailures = 0
       reported = value
@@ -423,22 +460,78 @@ async function report($: EngineInterface) {
   }
 }
 
-function failed(batch: number, edges: TurnTransition[]) {
-  if (batch === 0 && edges.length === 0) return
+// The prompt transitions one report carries: the first conversation's in the queue whose move no switch waits for,
+// in their order, at most TRANSITIONS of them.
+function promptBatch(): Transition[] {
+  const session = transitions.find((t) => !moving.has(t.session))?.session
+  return session === undefined ? [] : transitions.filter((t) => t.session === session).slice(0, TRANSITIONS)
+}
+
+function takeTransitions(batch: Transition[]) {
+  for (const sent of batch) {
+    const at = transitions.indexOf(sent)
+    if (at >= 0) transitions.splice(at, 1)
+  }
+}
+
+function failed(batch: Transition[], edges: TurnTransition[]) {
+  if (batch.length === 0 && edges.length === 0) return
   transitionFailures += 1
   if (transitionFailures < TRANSITION_TRIES) return
-  transitions.splice(0, batch)
+  takeTransitions(batch)
   turnTake(edges)
   transitionFailures = 0
 }
 
-// Tell mv2 this process moved to another session (a /clear), once Claude's own process file names it. Core also
+// Tell mv2 this process moved to another session (a /clear, a /resume or a fork), once Claude's own process file names it. Core also
 // reads that file, so reporting only after it has changed means no later read of it can still show the old session
 // (its writes only move forward). Claude starts that write before the SessionStart hooks but does not wait for it.
 // Once: core refuses what it cannot prove (an outdated launch, a session that is not this agent's); a refusal, or a
 // file that never shows the new session, is logged and never retried.
 const PROCESS_FILE_WAIT_MS = 5000
 const PROCESS_FILE_POLL_MS = 100
+// An end's bound and its backstop, then every try a batch gets before it is dropped (each report allowed 10 s).
+const MOVE_EDGES_WAIT_MS = TURN_ROWS_WAIT_MS + TURN_ROWS_POLL_MS + TRANSITION_TRIES * 10000
+// The conversations switches moved to whose moves aren't recorded (or given up) yet: their edges wait. The moves go
+// one at a time, in order, each from the conversation core has recorded.
+const moving = new Set<string>()
+let moves: Promise<void> = Promise.resolve()
+let recorded: string | undefined  // the conversation core has, once a switch has moved this load at all
+let newest: string | undefined    // the conversation the latest switch moved to
+// A switch's old conversation hands its turn edges and prompt events to core before Claude moves on: Claude waits for
+// its SessionEnd hooks before it switches and before its process file names the new conversation, which any mv2 read
+// then follows (core rebinds the agent itself, and drops the old conversation's edges sent after). Claude cuts the
+// hooks off at about 1.5 s (2.1.332): past this bound the switch goes on, and the move's own order still holds.
+const SWITCH_ENDS = new Set(["clear", "resume"])
+const SWITCH_HANDOVER_MS = 1200
+
+// The local command open now, and when the mod noted its row: the hold waits for its output only while it is recent.
+const commandRow: { id?: string; at: number } = { at: 0 }
+
+async function handedOver($: EngineInterface, conversation: string) {
+  try {
+    const deadline = (await $.clock.now()) + SWITCH_HANDOVER_MS
+    for (;;) {
+      // Each pass, as rows keep arriving: a command's end is decided at once, and one still open is waited for while
+      // its output can still come: within an end's bound of its row (one that never gets one, a /model with none,
+      // never holds a switch long after).
+      const command = turnLeaving(conversation)
+      const open = command !== undefined && command === commandRow.id && await $.clock.now() - commandRow.at < TURN_ROWS_WAIT_MS
+      if (!open && !turnEdgesFor(conversation) && !transitions.some((t) => t.session === conversation)) return
+      void report($)
+      const left = deadline - await $.clock.now()
+      if (left <= 0) return
+      const pause = $.clock.sleep(Math.min(TURN_ROWS_POLL_MS, left))
+      pause.catch(() => {})
+      await pause
+    }
+  } catch { /* Claude's bound for the hook passed, or the plugin unloaded: the switch goes on */ }
+}
+
+// What moves this process to another conversation: a /clear (a new one), a /resume or a fork (another one). Claude
+// raises classic.SessionStart for each, with the conversation's id; a typed /resume raises no session.start. A
+// resumed launch's own start raises one with source resume too, which moves nothing.
+const SWITCHES = new Set(["clear", "resume", "fork"])
 
 async function processFileSession($: EngineInterface) {
   try {
@@ -451,30 +544,49 @@ async function processFileSession($: EngineInterface) {
   }
 }
 
-async function moved($: EngineInterface, previous: string, session: string) {
-  // It runs on its own after a /clear: a wait the plugin's unloading cuts short has no one to tell, and nothing left
-  // to record. Its own failures are logged below.
+async function moved($: EngineInterface, previous: string, session: string, reason: string) {
+  // It runs on its own after a switch: a wait the plugin's unloading cuts short has no one to tell, and nothing left
+  // to record. Its own failures are logged below. Once it is done, recorded or not, the new conversation's edges go.
   try {
-    await recordMove($, previous, session)
-  } catch { /* the plugin unloaded while it waited */ }
+    await recordMove($, previous, session, reason)
+  } catch { /* the plugin unloaded while it waited */ } finally {
+    moving.delete(session)
+    try { void report($) } catch { /* the plugin unloaded */ }
+  }
 }
 
-async function recordMove($: EngineInterface, previous: string, session: string) {
+async function recordMove($: EngineInterface, cleared: string, session: string, reason: string) {
   const python = await $.env.get("MV2_PYTHON")
   if (!python) return
+  // Core takes a move only from the conversation it has, and only to the one Claude's process file names: after an
+  // earlier move that couldn't be recorded, that is still the one before it.
+  const previous = recorded ?? cleared
   let published = false
   for (let waited = 0; waited <= PROCESS_FILE_WAIT_MS; waited += PROCESS_FILE_POLL_MS) {
+    if (newest !== session) break  // a later /clear moved on before Claude named this one: core would refuse it
     if (await processFileSession($) === session) { published = true; break }
     await $.clock.sleep(PROCESS_FILE_POLL_MS)
   }
   if (!published) {
-    $.ui.log("multiverse: the move to a new session was not recorded: Claude's process file never named it")
+    if (newest === session) $.ui.log("multiverse: the move to a new session was not recorded: Claude's process file never named it")
     return
+  }
+  // The old conversation's turn and prompt edges reach core first: core drops a batch for a conversation it no
+  // longer has recorded, so a move recorded before them would lose the starts and ends of its turns. An edge leaves
+  // the queue only once core has taken it; past the bound, the move goes anyway.
+  const deadline = (await $.clock.now()) + MOVE_EDGES_WAIT_MS
+  const left_ = (conversation: string) => turnEdgesFor(conversation) || transitions.some((t) => t.session === conversation)
+  while (left_(previous) || left_(cleared)) {
+    void report($)
+    const left = deadline - await $.clock.now()
+    if (left <= 0) break
+    await $.clock.sleep(Math.min(TURN_ROWS_POLL_MS, left))
   }
   try {
     const result = await $.process.run([python, "-m", "multiverse.tools.runtime_update", "--native-session-id", session,
-      "--previous-session-id", previous, "--session-reason", "clear"], { timeoutMs: 10000, env: await pythonEnv($) })
+      "--previous-session-id", previous, "--session-reason", reason], { timeoutMs: 10000, env: await pythonEnv($) })
     if (result.exitCode !== 0) $.ui.log(`multiverse: the move to a new session was not recorded: ${result.stderr.trim()}`)
+    else recorded = session
   } catch (error) {
     $.ui.log(`multiverse: the move to a new session was not recorded: ${String(error)}`)
   }
@@ -755,11 +867,20 @@ async function storedLine($: EngineInterface, name: string, watch: Watch): Promi
 }
 const startsWith = (text: string, name: string) => text.includes(`<command-name>/${name}</command-name>`)
 
+// mv2 slash's records: the adapter removes a list's once it has read it; a run's it reads and core keeps the outcome,
+// so they are kept as prune.ts keeps the mod's records, as the prompts' end records are.
+const COMMAND_RECORD = /^[0-9a-f-]{36}\.json$/
+let commandsSincePrune = PRUNE_EVERY  // a load's first record prunes, so a folder left long grows no further
+
 async function commandRecord($: EngineInterface, id: string, record: Record<string, unknown>) {
   const directory = await $.env.get("MV2_AGENT_DIR")
   if (!directory) return
   const at = await $.clock.now()
   await $.fs.write(`${directory}/claude-commands/${id}.json`, JSON.stringify({ id, ...record, at }) + "\n")
+  if (++commandsSincePrune >= PRUNE_EVERY) {
+    commandsSincePrune = 0
+    await prune($, `${directory}/claude-commands`, COMMAND_RECORD)
+  }
 }
 
 // Claude's own list of the commands the person can run now, for `mv2 slash AGENT --list`. Answered at once.
@@ -879,14 +1000,39 @@ export const register: Register = (on) => {
     return result
   })
 
-  on("classic.SessionStart", { source: "clear" }, async ($, e, next) => {
+  // Before a /clear or a /resume moves this process on: the conversation it leaves hands its edges to core (its
+  // running turn's end, still being proved, included), and a move into it still pending is recorded first.
+  on("classic.SessionEnd", async ($, e, next) => {
+    const leaving = sessionId
+    if (!SWITCH_ENDS.has(e.reason) || leaving === undefined) return next(e)
+    // Side by side with the hooks beneath (the person's own among them): Claude's cut-off covers them all.
+    const [result] = await Promise.all([next(e), handedOver($, leaving)])
+    return result
+  })
+
+  on("classic.SessionStart", async ($, e, next) => {
     const result = await next(e)
+    if (!SWITCHES.has(e.source)) return result
+    // A /resume or a fork moves only from a conversation the mod knows to another one. Claude also raises SessionStart
+    // with source resume as a resumed launch starts (every wake, every mv2 resume), before the mod knows its
+    // conversation or naming the one it knows: nothing moves, and the turn state, the wake's startup marker with it,
+    // must stay as session.start leaves it.
+    if (e.source !== "clear" && (sessionId === undefined || !e.session_id || e.session_id === sessionId)) return result
     const previous = sessionId
     sessionId = e.session_id
     clears += 1
-    turnsCleared()  // the old conversation's waits stop; its edges still go, in their own order
+    // The old conversation's waits stop; its edges still go, in their own order, the turns it stored and never took
+    // in included.
+    for (const { end, place } of turnsCleared()) void finishTurn($, end, undefined, { place })
+    if (previous && e.session_id && previous !== e.session_id) {
+      const session = e.session_id
+      recorded ??= previous  // the conversation core had before this load's first /clear
+      moving.add(session)
+      newest = session
+      const reason = e.source
+      moves = moves.then(() => moved($, previous, session, reason), () => moved($, previous, session, reason))
+    }
     void report($)
-    if (previous && e.session_id && previous !== e.session_id) void moved($, previous, e.session_id)
     queueChanged($)  // the queue file names the conversation
     return result
   })
@@ -894,7 +1040,7 @@ export const register: Register = (on) => {
   on("turn.start", async ($, e, next) => {
     if (e.agentId === undefined) {
       starts += 1  // on entry: a turn.complete still in Claude's part sees that a turn (a continuation too) began since
-      turnStepped()  // and an end still being proved takes no row admitted from here on
+      const boundary = turnStepped()  // and an end still being proved takes no row admitted from here on
       // A command mv2 ran that expanded into a prompt starts its turn under its own name.
       const watch = watching.find((w) => !w.prompted && startsWith(e.text, w.name))
       if (watch !== undefined) {
@@ -908,7 +1054,13 @@ export const register: Register = (on) => {
       // is gone, and a new one is the new conversation's.
       const epoch = clears
       const session = await sessionNow($)
-      if (clears === epoch) turnStarted(session)
+      // The inputs this turn takes in are the opener rows stored before it. One still being noted is waited for, up to
+      // the bound, so it gets its start in its own place; the status goes meanwhile.
+      if (!turnArrived(boundary)) {
+        void report($)
+        await openersNoted($, boundary)
+      }
+      if (clears === epoch) for (const { end, place } of turnStarted(session, boundary)) void finishTurn($, end, undefined, { place })
       void report($)
       void refreshStatus($)
     }
@@ -1110,12 +1262,35 @@ export const register: Register = (on) => {
     }
   })
 
+  // A compaction's own rows, until its first real one, open no turn: the reader counts them as the compaction's. A
+  // /compact's command turn ends when its compaction returns.
+  on("session.compact", async ($, e, next) => {
+    if (e.agentId !== undefined) return next(e)
+    let state = "finished"
+    try {
+      const result = await next(e)
+      // Only an automatic compaction that happened leaves a span after it: a manual one's ends with its /compact's
+      // output, which Claude writes before this returns, and one with nothing to compact, or that failed, stores
+      // none. Otherwise the next command's caveat would open no turn.
+      if (e.trigger !== "manual") turnsCompacted()
+      return result
+    } catch (error) {
+      // Esc during the compaction aborts its request ("API Error: Request was aborted."); anything else failed it.
+      state = /aborted/i.test(String(error)) ? "interrupted" : "error"
+      throw error
+    } finally {
+      const end = e.trigger === "manual" ? turnCompactEnded(state) : undefined
+      if (end !== undefined) void finishTurn($, end)
+    }
+  })
+
   on("session.append", async ($, e, next) => {
     // The running turn this row belongs to is decided as it arrives, and held pending until it is noted: Claude
     // stores a turn's turn_duration row just before turn.complete, and noting it only once stored could fall after
     // the turn was marked over, or after the next one started.
     const ticket: Ticket = e.agentId === undefined
-      ? turnAdmit({ type: e.message.type, name: e.message.name, door: e.door, text: text(e.message.content) }, turnRunning, sessionId)
+      ? turnAdmit({ type: e.message.type, name: e.message.name, door: e.door, origin: e.origin, meta: e.message.isMeta === true,
+          text: text(e.message.content) }, turnRunning, sessionId)
       : { seq: 0 }
     try {
     const stored = text(e.message.content)
@@ -1125,7 +1300,9 @@ export const register: Register = (on) => {
     const noted = async (result: Awaited<ReturnType<typeof next>>, attempt?: string) => {
       if (e.agentId === undefined && "uuid" in result && typeof result.uuid === "string") {
         const commandEnd = turnRow(await sessionNow($), { door: e.door, origin: e.origin, type: e.message.type, name: e.message.name,
-          uuid: result.uuid, text: stored }, attempt ?? run, ticket, run !== undefined)
+          meta: e.message.isMeta === true, uuid: result.uuid, text: stored }, attempt ?? run, ticket, run !== undefined)
+        const opened = turnOpenCommand()
+        if (opened !== undefined && opened !== commandRow.id) Object.assign(commandRow, { id: opened, at: await $.clock.now() })
         // A local command's end goes once its output row is in the file, as a turn's does.
         if (commandEnd !== undefined) void finishTurn($, commandEnd)
         // A join or a local command changes no status: its event goes in a report of its own.

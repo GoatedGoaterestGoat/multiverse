@@ -164,13 +164,17 @@ class RunsTest(BaseTest):
                     for run in provider.plans:
                         if run.path.exists(): shutil.rmtree(run.path)
 
-        # The same real supervisor and Claude plan work whether the universe is in HOME or a project.
+        # Claude's run-local state must be cleaned up with a universe in HOME or in a project.
         home = self.work / 'run-home'
         home.mkdir()
         binary = self.work / 'stand-in-claude'
-        binary.write_text(f'#!{sys.executable}\nimport json,sys\n'
-                          'print("2.1.312 (Claude Code)" if sys.argv[1:] == ["--version"] else '
-                          'json.dumps({"is_error": False, "result": "fake reply", "stop_reason": "end_turn"}))\n')
+        binary.write_text(f'#!{sys.executable}\nimport json,sys\nfrom pathlib import Path\n'
+                          'if sys.argv[1:] == ["--version"]:\n'
+                          '    print("2.1.312 (Claude Code)")\n'
+                          'else:\n'
+                          '    Path(".claude").mkdir(exist_ok=True)\n'
+                          '    Path(".claude/scratch").write_text("run-local state")\n'
+                          '    print(json.dumps({"is_error": False, "result": "fake reply", "stop_reason": "end_turn"}))\n')
         binary.chmod(0o700)
         adapter = ClaudeAdapter.configured('claude', {'executable': str(binary)})
         environment = {'HOME': str(home), 'PATH': os.environ['PATH'], 'CLAUDE_CONFIG_DIR': str(self.work / 'claude-store')}

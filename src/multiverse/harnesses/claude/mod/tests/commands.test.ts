@@ -11,9 +11,10 @@ type Ran = { command: string; args: string }
 
 function world(on: On, options: { run?: (ran: Ran) => Promise<{ text?: string }>; model?: string; list?: Promise<void>;
   settings?: Record<string, unknown>; rows?: { role: 'user' | 'assistant'; text: string }[];
-  rowsHold?: { next?: Promise<void> }; peerHold?: { until?: Promise<void> } } = {}) {
+  rowsHold?: { next?: Promise<void> }; peerHold?: { until?: Promise<void> };
+  seeded?: { files: Record<string, string>; mtimes: Record<string, number>; now: number } } = {}) {
   mock.env(on, { MV2_PYTHON: '/python', MV2_AGENT_DIR: '/agent' })
-  const clock = mock.clock(on, { now: 0 })
+  const clock = mock.clock(on, { now: options.seeded?.now ?? 0 })
   on('session.start', async ($, e) => ({ cwd: e.cwd }))
   on('turn.start', async ($, e) => ({ turnId: e.turnId }))
   on('turn.complete', async ($, e) => ({ text: e.answer }))
@@ -21,9 +22,15 @@ function world(on: On, options: { run?: (ran: Ran) => Promise<{ text?: string }>
   const queue: string[] = []
   // A peer prompt reaches the queue as its hooks return; `peerHold.until` keeps that from happening at once.
   on('session.receive', async ($, e) => { await options.peerHold?.until; queue.push(`peer:${e.text}`); return { text: e.text } })
-  const files = new Map<string, string>()
-  on('fs.write', async ($, e) => { files.set(e.path, e.text); return { value: undefined } })
-  on('process.run', async () => ({ value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }))
+  const files = new Map<string, string>(Object.entries(options.seeded?.files ?? {}))
+  const mtimes = new Map<string, number>(Object.entries(options.seeded?.mtimes ?? {}))
+  on('fs.write', async ($, e) => { files.set(e.path, e.text); mtimes.set(e.path, clock.now()); return { value: undefined } })
+  on('fs.list', async ($, e) => ({ value: [...files.keys()].filter((p) => p.startsWith(`${e.path}/`))
+    .map((p) => ({ name: p.slice(e.path.length + 1), kind: 'file', size: 1, mtimeMs: mtimes.get(p) ?? 0, isLink: false })) }) as never)
+  on('process.run', async ($, e) => {
+    if (e.argv[0] === 'rm') for (const path of e.argv.slice(2)) files.delete(path)
+    return { value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
   on('session.id', async () => ({ value: '11111111-1111-4111-8111-111111111111' }))
   on('session.model', async () => ({ value: options.model ?? 'claude-haiku-5-5' }))
   // A read of the conversation, held when the test asks for it to answer late (it answers with the rows by then).
@@ -140,6 +147,28 @@ describe('commands for mv2', () => {
     // The kit can't make Claude reject a run (a stand-in hook that throws is skipped), so the rejection reaches the mod
     // as the kit's own error: either way the run is recorded as failed, with a reason.
     expect(record(w.files, RUN)).toEqual({ id: RUN, state: 'failed', reason: expect.any(String), at: expect.any(Number) })
+  })
+
+  test("mv2 slash's records are kept for a while, then pruned", async ($, on) => {
+    // A run's record stayed for good, one per mv2 slash run; pruned at once, a slow read of the result would find none.
+    const day = 24 * 3600 * 1000
+    const now = 10 * day
+    const id = (n: number) => `${String(n).padStart(8, '0')}-0000-4000-8000-000000000000`
+    const files: Record<string, string> = {}
+    const mtimes: Record<string, number> = {}
+    for (let n = 0; n < 60; n++) {
+      files[`/agent/claude-commands/${id(n)}.json`] = '{}'
+      mtimes[`/agent/claude-commands/${id(n)}.json`] = n < 10 ? now - 2 * day - n : now - 1000 - n  // ten old, fifty today
+    }
+    const w = world(on, { seeded: { files, mtimes, now } })
+    await $.session.start({ cwd: '/work' } as never)
+    await $.session.receive({ origin: { kind: 'peer' }, text: frame('commands', LIST, {}) })
+    await w.clock.settle()
+    // Every record from today stays, past the newest 48 too, and the new list's; only the day-old ones go.
+    const kept = [...w.files.keys()].filter((p) => p.startsWith('/agent/claude-commands/'))
+    expect(kept.length).toBe(51)
+    for (let n = 10; n < 60; n++) expect(kept).toContain(`/agent/claude-commands/${id(n)}.json`)
+    expect(record(w.files, LIST).state).toBe('listed')
   })
 
   // The list is what mv2 refuses against and shows: a frame answered as a turn, or a list missing the source, would

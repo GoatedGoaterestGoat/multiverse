@@ -516,6 +516,21 @@ def _parse_pre_key(key: str | None) -> tuple[str, int] | None:
     return (parts[0], steps) if steps >= 1 else None
 
 
+def _parse_injected_key(key: str | None) -> tuple[int, int] | None:
+    """`inj:{initialNumSteps}:{seq}:{index}` names the index-th message hook replies injected from that step.
+
+    `index` counts the messages of every `PreInvocation` reply at that step in the open turn, in order (agy can repeat
+    one, as when it attaches a server-restart notice), so it is the index-th hook-injected row from there.
+    """
+    if not isinstance(key, str) or not key.startswith('inj:'):
+        return None
+    parts = key.split(':')
+    if len(parts) != 4 or not all(part.isdecimal() for part in parts[1:]):
+        return None
+    steps, index = int(parts[1]), int(parts[3])
+    return (steps, index) if steps >= 1 else None
+
+
 def project_turn_event(session, selected_view: TranscriptView, transition, *, reader=None) -> TurnProjection:
     """Project one native turn transition onto exact row positions inside `selected_view`."""
     _check(reader)
@@ -626,7 +641,26 @@ def project_turn_event(session, selected_view: TranscriptView, transition, *, re
                 return TurnProjection(turn_position=turn_pos, row_position=None)
         return TurnProjection(turn_position=turn_pos, row_position=rows[last_idx].position)
 
-    row_idx = resolve_index(ref_key)
+    injected = _parse_injected_key(ref_key)
+    if injected is not None:
+        # The injected rows are appended in order from step-{initialNumSteps}, before that invocation's response;
+        # count only hook-injected input, and stop at the response so a row agy never wrote names no later one.
+        steps, index = injected
+        seen = -1
+        row_idx = None
+        for idx, row in enumerate(rows):
+            step_no = _step_number(row.ref)
+            if step_no is None or step_no < steps:
+                continue
+            if row.label not in ('prompt', 'mid_turn', 'injected', 'meta'):
+                break
+            if row.kind == 'USER_INPUT' and row.source == 'plugin':
+                seen += 1
+                if seen == index:
+                    row_idx = idx
+                    break
+    else:
+        row_idx = resolve_index(ref_key)
     if (isinstance(transition, TurnStarted) and turn_idx is not None
             and ref_key == turn_key and (row_idx is None or rows[row_idx].label in ('injected', 'meta'))):
         # When PreInvocation's initialNumSteps landed on a post-prompt housekeeping notice, anchor start at the prompt.

@@ -614,7 +614,7 @@ def _account(item, conversation, responses, last, observed):
 # row's fields or labels differently, so an index from older code is read again rather than trusted.
 ROW_STORE = 'claude-rows'
 ROW_SCHEMA = 1
-ROW_DERIVATION = 1
+ROW_DERIVATION = 6
 ROW_STORE_BYTES = 128 << 20
 ENCODE_ROWS = 16384  # rows per encoded chunk of a saved section, each after a deadline check
 ROW_SAVE_INTERVAL = 5
@@ -1082,6 +1082,8 @@ def _head(row, content, attachment):
 
 def _mark(head):
     """The one thing labelling needs from a row's text: which of Claude's markers it starts with, if any."""
+    if head.startswith(CAVEAT):
+        return 'caveat'
     if head.startswith(COMMAND_OUTPUT):
         return 'output'
     if head.startswith('<command-name>'):
@@ -1097,12 +1099,15 @@ def _mark(head):
 
 INTERRUPTED = '[Request interrupted by user'  # Claude's marker for an Esc: it ends the turn, and usually no turn_duration follows
 COMMAND_OUTPUT = ('<local-command-stdout>', '<local-command-stderr>', '<local-command-caveat>')
+CAVEAT = '<local-command-caveat>'  # the first of the user rows Claude stores a local command as (2.1.332: /reload-plugins)
 
 
 def labels(entries, check=None):
     """(label, source) for each entry, by Claude's rules (docs/design/transcript-protocols.md, Labels)."""
     out, seen, command, span = [], set(), None, False  # command: the promptId of the latest typed command
+    caveat = None  # (promptId, ref) of the local command a caveat opened: its '<command-name>' row is its output
     outputs = set()  # the refs of command output rows: a meta row under one is the command's report (/context's)
+    opened = None  # in a span: the promptId of Claude's own command there (its /compact), whose rows are its own
     tick = ticker(check)
     for item in entries:
         if tick is not None:
@@ -1111,6 +1116,7 @@ def labels(entries, check=None):
         new = item.prompt_id is not None and item.prompt_id not in seen
         if item.kind == 'system/compact_boundary':
             label, span = 'compaction', True
+            caveat = opened = None  # nothing before the boundary pairs with what the compaction stored
         elif span and (item.kind == 'assistant' and item.usage or item.kind == 'user' and item.origin
                        or item.tool_result and item.tool_use_result):
             span = False  # the first real row ends what a compaction stored
@@ -1119,11 +1125,36 @@ def labels(entries, check=None):
         elif item.summary:
             label = 'compaction'
         elif item.kind == 'user':
-            if item.origin:
+            # Where Claude stores a local command as user rows, its caveat is its first row: the command, whatever its
+            # origin (a command mv2 runs has it stamped); the '<command-name>' row after it is its output, matched by
+            # promptId or by the caveat being its parent (2.1.332 stores /clear's caveat with no promptId, and its
+            # name row with another or none). So in a compaction's span too, where Claude's own caveat opens its
+            # /compact's turn; but where the typed /compact row was stored before the boundary (2.1.288 to 2.1.318),
+            # its caveat, name row and output there carry its promptId and are its output, one turn.
+            if item.mark == 'caveat' and item.meta and span and item.prompt_id is not None and item.prompt_id == command:
+                label, opened = 'command_output', item.prompt_id
+            elif item.mark == 'caveat' and item.meta:
+                label, command = 'command', item.prompt_id
+                caveat = (item.prompt_id, item.ref)
+                if span:
+                    opened = item.prompt_id
+            elif item.mark == 'command-name' and caveat is not None and (
+                    item.prompt_id is not None and item.prompt_id == caveat[0]
+                    or item.parent is not None and item.parent == caveat[1]):
+                label = 'command_output'
+            elif item.origin:
                 label, source = 'prompt', item.origin
             elif item.tool_result:
                 label = 'compaction' if span else 'tool_result'
-            elif item.mark == 'output' or item.mark == 'command-name' and item.prompt_id == command:
+            elif span and item.mark == 'command-name':
+                # In a span, a name row is Claude's own command's only under its caveat, or under its typed row from
+                # before the boundary; a command a compaction installed has neither, and is part of what it installed.
+                label = 'command_output' if opened is not None and item.prompt_id == opened else 'compaction'
+            elif span and item.mark == 'output':
+                label = 'command_output' if opened is not None and item.prompt_id == opened else 'compaction'
+                if label == 'command_output':
+                    span = False  # a manual compaction's /compact output is the last row Claude writes for it
+            elif item.mark in ('output', 'caveat') or item.mark == 'command-name' and item.prompt_id == command:
                 label = 'command_output'
             elif item.mark == 'command-name':
                 label, command = 'command', item.prompt_id
@@ -1143,7 +1174,7 @@ def labels(entries, check=None):
             label = 'mid_turn' if item.attachment == 'queued_command' and item.command_mode == 'prompt' else 'injected'
             source = item.origin if label == 'mid_turn' else None
         elif item.kind == 'system/local_command':
-            label = 'command_output' if item.mark == 'output' else 'command'
+            label = 'command_output' if item.mark in ('output', 'caveat') else 'command'  # a system caveat is output
         elif item.kind == 'assistant':
             label = 'compaction' if span else 'response'
         if item.prompt_id:

@@ -377,12 +377,24 @@ def _row_store(session):
     return Path(session.session_file).parent / ROW_STORE if session.session_file else None
 
 
+def _names(item, label):
+    # A row that names a command gives its command and args whatever its label: a local command's echo after its
+    # caveat is command_output, and still the row that names it.
+    return label == 'command' or item.mark == 'command-name'
+
+
+def _reads_text(item, label):
+    """Whether a row's fact reads its text: a view reads it from the transcript for a row taken from a saved index,
+    which keeps none."""
+    return label in ('prompt', 'command') or _names(item, label)
+
+
 def _fact(item, label, source):
-    command, args = rows_source.command_of(item.head) if label == 'command' else (None, None)
+    command, args = rows_source.command_of(item.head) if _names(item, label) else (None, None)
     call = item.answers[0] if item.kind == 'user' and item.tool_result and item.answers else item.companion
     return RowFact(position=rows_source.position_of(item), ref=item.ref, kind=item.kind, label=label, source=source,
                    call_id=call, command=command, args=args, stop=item.stop, ends_turn=rows_source.ends_turn(item),
-                   at=item.at, size=item.size, preview=item.head[:200] if label in ('prompt', 'command') else '')
+                   at=item.at, size=item.size, preview=item.head[:200] if _reads_text(item, label) else '')
 
 
 def launch_storage(session, environment):
@@ -1742,7 +1754,7 @@ class ClaudeAdapter(ConfiguredAdapter):
             for item, labelled in zip(entries, analysis.labels):
                 if check is not None:
                     check()  # every row, as the parse does
-                if item.head is None and labelled[0] in ('prompt', 'command'):
+                if item.head is None and _reads_text(item, labelled[0]):
                     transcript = transcript or opened.enter_context(rows_source.open_regular(index.path))
                     item = rows_source.with_text(transcript, item)
                 made.append(_fact(item, *labelled))
@@ -1923,6 +1935,7 @@ class ClaudeAdapter(ConfiguredAdapter):
         return RunPlan(command=CommandSpec(tuple(argv), one_shot.UNSET, environment=dict(extra)),
                        files=(RunFile(path=f'projects/{key}/{run.id}.jsonl', content=content, root='store'),) if rows
                        else (),
+                       disposable=('.claude',),  # Claude can write state in its private working directory.
                        interpret=interpret)
 
     def transcript_readable(self, session, *, reader=None):

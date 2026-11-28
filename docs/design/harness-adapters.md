@@ -1550,7 +1550,10 @@ sends to or resumes an agent, so a launch without the bridge follows a `/clear`
 too. A report that names another session than the process file shows is
 refused. Core then rebinds the agent and records the move in its session history
 ([session lineage](session-lineage.md)). Messages, usage and resume go to the new session;
-the old conversation stays on disk as an earlier generation.
+the old conversation stays on disk as an earlier generation. A `/resume` typed in the
+session, or a fork, moves the same process to another conversation, and the mod
+reports it as it does a `/clear`, with its own reason: Claude raises `SessionStart`
+with source `resume` for it, and no `session.start`.
 
 The pieces keep to their own side of the boundary:
 
@@ -1727,8 +1730,10 @@ typeahead with an argument hint, and runnable while a turn is running):
 - `/multiverse send <agent> <text>` runs `mv2 send` with this session's own
   `MV2_AGENT_ID`, so the recipient reads `Message from <this agent>`. The person
   types it to speak as this agent; to message an agent as themselves they type to
-  it directly or run `mv2 send` from a shell. The result is `mv2 send`'s own text,
-  shown as printed: what was delivered, or what was saved and why it was not.
+  it directly or run `mv2 send` from a shell. The result names the recipient and
+  the text, then gives `mv2 send`'s own text as printed: what was delivered, or
+  what was saved and why it was not. Claude stores a plugin command without its
+  arguments, so that first line is the only place the model sees what was sent.
 - `/multiverse inbox` is a normal `mv2 inbox --json` read (the mod parses the JSON
   and formats it; the CLI's default output is readable text for people): it shows
   this agent's unread inbox messages and marks them read. The output is
@@ -1864,14 +1869,75 @@ conversation's, never from Claude's transcript.
 
 Turn events go the same way (`--turn-events-json`), from the rows Claude stores
 (`session.append`, with each row's id) and its turn hooks, grouped as the transcript
-reader groups rows. A user row with an origin opens a prompt turn: it is stored just
-before `turn.start`, which starts the turn under that row's id; a `turn.start` with
-no new row continues the last turn, which then ends again. A `queued_command` row
+reader groups rows. A user row with an origin opens a prompt turn; so does one with
+none that is neither meta, nor marked as a command, its output, a `/compact` or an
+interruption, nor in an automatic compaction's span (from its `session.compact`
+returning, until the next stamped row, reply or tool result, which is itself counted
+outside it, or the user stdout row of a command a caveat opened in the span), as the
+reader counts it; a manual compaction's span ends with its
+`/compact`'s output, which Claude writes before `session.compact` returns, and a
+compaction that fails or has nothing to compact stores no boundary, so neither leaves one. The reader also
+wants such a row's `promptId` to be new, which an append doesn't show; on Claude
+Code 2.1.332 the only rows with no origin that reach it as a prompt or a command are a
+typed local command's, and a native compaction's own rows never reach it. A prompt row
+is stored just before `turn.start`, which starts the turn under that row's id; a
+`turn.start` with no new row continues the last turn, which then ends again. Claude
+can store several such rows before one `turn.start`, as it does for follow-ups queued
+behind a turn: each is a turn of its own, started in the order stored, and each but
+the last ends finished before the next one's start, naming its last row (its own, or
+one stored with it before the next, such as hook context, but never a `/compact`, a caveat
+or a `<command-name>` row, which the reader puts in a command turn of its own), once that
+row is in the file, as for any end. An end is proved in its own conversation's file, named after its
+session beside the current one, so an end a `/clear` overtakes is still proved there;
+one no read proved, its conversation since moved on, names its last noted row. The `turn.start` waits, up to 2 s, for an opener row whose
+append is still running, so its start goes in its place; one noted after that is
+never a turn. Such rows a conversation stored and never took in before a `/clear`
+are still its turns: each starts under it, each but the last ends finished, naming
+its last noted row since the old file is no longer read, and the last is left for
+core to end at the switch. The move itself (`--native-session-id`) goes only once
+those edges and its prompt events have reached core, at most an end's bound and
+every try a report gets later, and each conversation a switch (a `/clear`, a `/resume`, a fork)
+moved to keeps its edges until the move to it is recorded or given up: core drops a batch for a
+conversation other than the one it has recorded. Turn edges and prompt events go one
+conversation at a time, so one waiting for its move never holds up another's. The moves go one
+at a time, in order, each from the conversation core has; a move overtaken by a later switch
+before Claude's process file named its conversation is given up (core would refuse it), so the
+next goes from the one before it. Before a `/clear` or a `/resume` switches at all, the
+conversation it leaves hands its edges to core in Claude's `SessionEnd` hook, which Claude
+waits for (about 1.5 s at most) before it switches and before its process file names the new
+conversation: any mv2 read after that rebinds the agent itself (reason `detected`), and core
+takes none of the old conversation's edges after it. The hold runs beside the other
+`SessionEnd` hooks and also waits for a local command of the old conversation still open (its
+output row not noted yet) while its row is recent, within an end's bound, so one that never gets an
+output (a `/model` with none) holds no later switch; a command's end waiting for the next row goes then with no report,
+since none comes, and a move into the old conversation still pending is recorded first, so the
+middle conversation of two quick `/clear`s is recorded too. A `queued_command` row
 in a running turn is a join. A local command's row opens a command turn, and its
-output row ends it, or the note it stores for the model right after its output
+output row ends it, a system row or, for `/model` or `/effort` typed with an argument on
+2.1.332, a user `<local-command-stdout>` row; where Claude stores the command as user rows (a caveat, its
+`<command-name>` row, then its output, as Claude Code 2.1.332 does for
+`/reload-plugins`, typed or run by mv2), the caveat opens it, and its start takes its
+place at once and goes once the row after it says how: the `<command-name>` row
+names the command and, for one mv2 ran, the run, and any other row leaves the
+caveat's own source; a caveat inside an automatic compaction's span opens its command too, as
+the reader counts it, and the span goes on, as the reader's does: a system output row (2.1.332's
+`/reload-plugins`) leaves it, and only that command's user stdout row or a real row ends it. The output row ends it, or the note it stores for the model right after its output
 (`/context`'s report), which the reader groups with it: the command's end waits for
 the next row in its conversation to say which; Claude raises no turn hooks for
-those. The source is the
+those. A `/compact`'s own row (typed, a note from
+Claude's engine; run by mv2, a prompt mv2's plugin submitted), which the file later holds
+as its `<command-name>` row under the same id, starts its command turn, and the turn ends,
+finished, when the manual compaction's `session.compact` returns: no row after it reaches
+the mod. Claude stores that row under its caveat, the row's parent, whether the compaction
+worked (inside its span) or failed (as a local command's rows, with no boundary), and the
+caveat opens its turn in the file; so the start waits until the file holds its row, then
+the start and end name the caveat and the end the output under the row. Where the row has
+no caveat as its parent (Claude Code 2.1.288 to 2.1.318 stored the typed row before the
+boundary), they name the row. A compaction that fails ends it as an error, or interrupted
+when Esc aborted its request. One that never comes (Claude raises no `session.compact` for "No messages
+to compact") lets its start go at the next command, `turn.start` or `/clear`, and leaves its end
+to core. A command's report for the model is a meta note: a typed `/compact` right after a
+local command's output is a note too, but not that command's report. The source is the
 person's for a typed row (Claude stores a typed local command as its own) and the
 harness's otherwise, with the mv2 delivery attempt the mod matched the row to;
 core makes it mv2's. On the first load, `MV2_FIRST_TASK` marks the first composer

@@ -726,7 +726,15 @@ def _build_groups(loaded):
         row, kind = loaded.view.rows[first], group['kind']
         turn_id = 'preamble' if kind == 'preamble' else row.ref or '@' + _cursor(loaded, first)
         if kind == 'command':
-            finished = any(loaded.view.rows[i].label == 'command_output' for i in indexes)
+            # Its command and args are its first row's that names one, which needn't be its first row (Claude's
+            # caveat names none); it is finished at a command_output row stored after the last row that names it, so
+            # an echo alone doesn't finish it (Claude's older layout names it twice: the typed row and its echo), or
+            # at any command_output row when none names one.
+            naming = [n for n, i in enumerate(indexes) if loaded.view.rows[i].command]
+            if naming:
+                row = loaded.view.rows[indexes[naming[0]]]
+            after = indexes[naming[-1] + 1:] if naming else indexes
+            finished = any(loaded.view.rows[i].label == 'command_output' for i in after)
         elif kind == 'prompt':
             finished = n < last_prompt
             ends = [loaded.view.rows[i] for i in indexes if loaded.view.rows[i].ends_turn]
@@ -738,8 +746,9 @@ def _build_groups(loaded):
                     finished = None
         else:
             finished = None
+        first_row = loaded.view.rows[first]
         result.append((Turn(id=turn_id, kind=kind, command=row.command if kind == 'command' else None,
-                            args=row.args if kind == 'command' else None, source=row.source, at=row.at,
+                            args=row.args if kind == 'command' else None, source=first_row.source, at=first_row.at,
                             start=_cursor(loaded, first, history=True, side='before'),
                             end=_cursor(loaded, last, history=True), rows=len(indexes),
                             in_context=bool(context.intersection(indexes)), finished=finished,
@@ -770,7 +779,10 @@ def _groups(loaded):
 
 @dataclass(frozen=True, kw_only=True)
 class TurnReference:
-    """Public turn and row identity established by one immutable transcript view."""
+    """Public turn and row identity established by one immutable transcript view.
+
+    A cursor without a turn can name a row in the current history's preamble.
+    """
     turn: str | None = None
     ref: str | None = None
     generation: str | None = None
@@ -909,7 +921,7 @@ def _read_turn_references(root, directory, launch_id, native_id, generation, tra
                 row = loaded.positions.get(chosen.row_position)
                 pending_rows |= edge.ref is not None and row is None
             turn = anchors.get(anchor)
-            if row is not None and (row not in by_row or turn is not None and turn.id != by_row[row]):
+            if row is not None and by_row.get(row) != (turn.id if turn is not None else 'preamble'):
                 row = None
             ref = _cursor(loaded, row) if row is not None else None
             results.append(TurnReference(turn=turn.id if turn is not None else None, ref=ref,
